@@ -135,12 +135,16 @@ async def _wallet_cycle(seed_mode: bool = False) -> None:
 
 # --------------------------- coin cycle + correlation ---------------------------
 def _format_confluence(m: dict) -> str:
+    side_emoji = "🟢" if m["side"] == "long" else "🔴"
     head = (
-        f"⭐ <b>STRONG CONFLUENCE</b> — {m['coin']} {m['side'].upper()}\n\n"
-        f"Technical score: {m['score']}\n"
-        f"Whales aligned: {m['whales']} (${m['total_notional']:,.0f})\n"
+        f"⭐⭐⭐ <b>STRONG CONFLUENCE</b> ⭐⭐⭐\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{side_emoji} <b>{m['coin']} {m['side'].upper()}</b>\n"
+        f"📊 Technical score: <b>{m['score']}</b>\n"
+        f"🐋 Whales aligned: <b>{m['whales']}</b> (${m['total_notional']:,.0f})\n"
+        f"━━━━━━━━━━━━━━━━\n\n"
     )
-    return head + "\n" + format_setup(m["setup"])
+    return head + format_setup(m["setup"])
 
 
 async def _coin_cycle() -> None:
