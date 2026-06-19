@@ -1,10 +1,8 @@
 """Single-destination Telegram send layer.
 
-Uses the one PTB Application's bot (set at startup) — no second Bot instance.
-Proactive alerts go to every chat that has toggled the bot on with alerts
-enabled (the personal-tool model: your DM). The send_alert / send_photo_alert
-shims keep the wallet tracker's existing calls working unchanged; paid_only is
-accepted but ignored, since there is a single destination.
+Uses the one PTB Application's bot. Proactive alerts go to every chat that
+has toggled the bot on. paid_only is accepted but ignored (single destination).
+Supports pinning messages (used for strong confluence alerts).
 """
 import asyncio
 import io
@@ -41,34 +39,49 @@ async def _retry(call, attempts: int = 3):
         raise last
 
 
-async def send_to_chat(chat_id: int, text: str = None, photo: bytes = None, caption: str = None) -> None:
+async def send_to_chat(chat_id: int, text: str = None, photo: bytes = None,
+                       caption: str = None):
+    """Send a message to one chat, return the Message object."""
     bot = _app.bot
     if photo is not None:
-        await _retry(lambda: bot.send_photo(
+        return await _retry(lambda: bot.send_photo(
             chat_id=chat_id,
             photo=InputFile(io.BytesIO(photo), filename="alert.png"),
             caption=caption or "",
             parse_mode=ParseMode.HTML,
         ))
     else:
-        await _retry(lambda: bot.send_message(
-            chat_id=chat_id, text=text,
-            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        return await _retry(lambda: bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
         ))
 
 
-async def broadcast(text: str = None, photo: bytes = None, caption: str = None) -> bool:
+async def broadcast(text: str = None, photo: bytes = None, caption: str = None,
+                    pin: bool = False) -> bool:
+    """Broadcast to all active alert chats. If pin=True, pin the message."""
     sent_any = False
     for chat_id in db.get_alert_chats():
         try:
-            await send_to_chat(chat_id, text=text, photo=photo, caption=caption)
+            msg = await send_to_chat(chat_id, text=text, photo=photo, caption=caption)
+            if pin and msg:
+                try:
+                    await _app.bot.pin_chat_message(
+                        chat_id=chat_id,
+                        message_id=msg.message_id,
+                        disable_notification=False,  # notify = True (user asked for it)
+                    )
+                except Exception as e:
+                    log.warning("Could not pin message in %s: %s", chat_id, e)
             sent_any = True
         except Exception as e:
             log.warning("send to %s failed: %s", chat_id, e)
     return sent_any
 
 
-# --- compatibility shims used by trackers/wallet_tracker.py (paid_only ignored) ---
+# --- compatibility shims (paid_only ignored) ---
 async def send_alert(message: str, paid_only: bool = False) -> None:
     await broadcast(text=message)
 
