@@ -156,7 +156,9 @@ async def _coin_cycle() -> None:
         for s in setups:
             if s.get("score", 0) < config.MIN_SCORE_FOR_ALERT:
                 continue
-            key = f"coin:{s.get('coin')}:{round(float(s.get('score', 0)))}"
+            inner = (s.get("setups") or [{}])[0]
+            direction = (inner.get("direction") or "long").lower()
+            key = f"coin:{s.get('coin')}:{direction}"
             await alerts_svc.maybe_send("coin", key, format_setup(s), cooldown_minutes=240)
 
         matches = corr.find_confluence(setups)
@@ -167,6 +169,7 @@ async def _coin_cycle() -> None:
                 await alerts_svc.maybe_send(
                     "correlation", key, _format_confluence(m),
                     cooldown_minutes=config.CORRELATION_COOLDOWN_MINUTES,
+                    pin=True,
                 )
         log.info("Coin-scan cycle complete (%s setups, %s confluence).", len(setups), len(matches))
     except Exception as e:
