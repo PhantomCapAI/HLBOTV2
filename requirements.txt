@@ -1,0 +1,9 @@
+python-telegram-bot[job-queue]==20.7
+aiohttp==3.9.1
+python-dotenv==1.0.0
+pandas==2.2.2
+numpy==1.26.4
+# Optional charts (only loaded when ENABLE_CHARTS=true). Need ~1GB RAM.
+mplfinance==0.12.10b0
+matplotlib==3.8.4
+pillow==10.3.0

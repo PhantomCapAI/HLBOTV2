@@ -1,0 +1,102 @@
+{
+  "name": "hl-intel-hyperdash-promoted-2026-05-25",
+  "notes": "Deployable scanner watchlist promoted from Hyperdash very_profitable cohort. Priority A is core; Priority B is secondary dig/watch.",
+  "wallets": [
+    {
+      "address": "0xf00bb08f7d1d04a9415408c939c02410fc6791b1",
+      "label": "hyperdash-flagship-btc-hype",
+      "priority": "A",
+      "tokens": ["BTC", "HYPE"],
+      "min_notional_change_usd": 50000,
+      "notes": "Core BTC/HYPE watch. Alert on BTC/HYPE adds, trims, exits, flips, or major HYPE uPnL compression."
+    },
+    {
+      "address": "0xaede390f5b5b7cf77428030ccfc73d99a44e1602",
+      "label": "hyperdash-hype-active-watch",
+      "priority": "A",
+      "tokens": ["HYPE"],
+      "min_notional_change_usd": 50000,
+      "notes": "Core HYPE watch. Alert on HYPE adds, trims, full exit, flip, or fast move into large unrealized loss."
+    },
+    {
+      "address": "0x12f5f5ce07647f5e7bf9ea054ea119d1cbb85a9b",
+      "label": "hyperdash-hype-directional-watch",
+      "priority": "A",
+      "tokens": ["HYPE"],
+      "min_notional_change_usd": 50000,
+      "notes": "Core HYPE directional watch. Alert on HYPE adds, trims, full exit, flip, or uPnL compression."
+    },
+    {
+      "address": "0xe25173b3558e8644d719f2cd3095dccbf5efeaba",
+      "label": "hyperdash-btc-major-watch",
+      "priority": "A",
+      "tokens": ["BTC", "BCH"],
+      "min_notional_change_usd": 50000,
+      "notes": "Core BTC/BCH watch. Alert on BTC/BCH adds, trims, full exit, flip, or leverage expansion."
+    },
+    {
+      "address": "0x9a770e9cd5d05e9e5636b87c822bafb53e02bdc9",
+      "label": "hyperdash-hype-vvv-watch",
+      "priority": "B",
+      "tokens": ["HYPE", "VVV", "AERO"],
+      "min_notional_change_usd": 50000,
+      "notes": "Secondary HYPE/VVV/AERO watch pending manual dig."
+    },
+    {
+      "address": "0x718cc7ee2ae2493ebf7d454316df6b61f4e1a868",
+      "label": "hyperdash-zec-profit-watch",
+      "priority": "B",
+      "tokens": ["ZEC"],
+      "min_notional_change_usd": 50000,
+      "notes": "Secondary ZEC profit watch pending manual dig."
+    },
+    {
+      "address": "0xaa2a33c424b92cdc042e40c522cb48e586e83026",
+      "label": "hyperdash-eth-hype-short-watch",
+      "priority": "B",
+      "tokens": ["ETH", "HYPE", "LIT"],
+      "min_notional_change_usd": 50000,
+      "notes": "Secondary bearish ETH/HYPE watch pending manual dig."
+    },
+    {
+      "address": "0xe79d69fd1ed52dd14d7f55155259519ea20d0534",
+      "label": "hyperdash-hype-short-watch",
+      "priority": "B",
+      "tokens": ["HYPE"],
+      "min_notional_change_usd": 75000,
+      "notes": "Secondary large HYPE short watch pending manual dig."
+    },
+    {
+      "address": "0xb40da15b8cc492fff87d9b1e06bb45769d7e75d9",
+      "label": "hyperdash-hype-zec-near-watch",
+      "priority": "B",
+      "tokens": ["HYPE", "ZEC", "NEAR"],
+      "min_notional_change_usd": 50000,
+      "notes": "Secondary HYPE/ZEC/NEAR watch pending manual dig."
+    },
+    {
+      "address": "0x88a0511a229643ae6e4ef263a08297343e11bf63",
+      "label": "hyperdash-hype-sui-watch",
+      "priority": "B",
+      "tokens": ["HYPE", "SUI"],
+      "min_notional_change_usd": 50000,
+      "notes": "Secondary HYPE/SUI watch pending manual dig."
+    },
+    {
+      "address": "0xe09726ff25f5001f37b15049f54116cb83d7d0fe",
+      "label": "hyperdash-crypto-basket-watch",
+      "priority": "B",
+      "tokens": ["SOL", "LIT", "SYRUP", "BTC", "PENDLE", "VIRTUAL", "HYPE", "PUMP", "ETHFI"],
+      "min_notional_change_usd": 75000,
+      "notes": "Secondary basket watch pending manual dig."
+    },
+    {
+      "address": "0x04cc3147bc87999e5a6b75373daa6ff8f12b38d1",
+      "label": "hyperdash-premium-reactivation-watch",
+      "priority": "B",
+      "tokens": ["BTC", "ETH", "HYPE", "SOL", "ZEC"],
+      "min_notional_change_usd": 50000,
+      "notes": "Premium reactivation watch. Alert only on fresh meaningful crypto exposure."
+    }
+  ]
+}

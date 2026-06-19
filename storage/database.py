@@ -1,0 +1,424 @@
+"""SQLite persistence + alert-dedup ledger.
+
+Ported from the repo scanner's data/database.py with three audited fixes:
+  W3 - all snapshot timestamps now written with SQLite datetime('now') so they
+       compare correctly against the window queries (was Python isoformat 'T').
+  W4 - get_previous_positions returns the single most-recent prior snapshot per
+       (coin, side) instead of the oldest-of-50, so size-increase baselines are
+       the immediately previous cycle.
+  W5 - prune_old_data() retention job to stop unbounded table growth.
+
+Plus two new tables for the personal-tool toggle:
+  subscribers  - chat ids that have toggled the bot on (+ alerts pause flag)
+  app_state    - small key/value store (e.g. seed bookkeeping)
+"""
+import sqlite3
+from contextlib import contextmanager
+from typing import Iterator
+
+import config
+
+DB_PATH = config.DB_PATH
+
+
+@contextmanager
+def get_conn() -> Iterator[sqlite3.Connection]:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    with get_conn() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                account_value REAL NOT NULL,
+                day_pnl REAL,
+                week_pnl REAL,
+                snapshot_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS position_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                coin TEXT NOT NULL,
+                side TEXT NOT NULL,
+                size REAL NOT NULL,
+                notional_usd REAL NOT NULL,
+                entry_px REAL NOT NULL,
+                liq_px REAL NOT NULL DEFAULT 0,
+                unrealized_pnl REAL NOT NULL,
+                snapshot_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS funding_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT NOT NULL,
+                funding_rate REAL NOT NULL,
+                open_interest REAL NOT NULL,
+                mark_px REAL NOT NULL,
+                snapshot_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS alerts_sent (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_type TEXT NOT NULL,
+                key TEXT NOT NULL,
+                sent_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS wallet_labels (
+                address TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT 'unknown',
+                name TEXT,
+                notes TEXT,
+                tagged_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS wallet_performance_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                account_value REAL NOT NULL,
+                exposure_total REAL NOT NULL,
+                open_upnl REAL NOT NULL,
+                negative_upnl REAL NOT NULL,
+                open_positions INTEGER NOT NULL,
+                book_leverage REAL NOT NULL,
+                state TEXT NOT NULL,
+                snapshot_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS subscribers (
+                chat_id INTEGER PRIMARY KEY,
+                active INTEGER NOT NULL DEFAULT 1,
+                alerts_enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT NOT NULL
+            );
+        """)
+        try:
+            conn.execute("ALTER TABLE position_snapshots ADD COLUMN liq_px REAL NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_leaderboard_address_snapshot
+                ON leaderboard_snapshots(address, snapshot_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_position_address_snapshot
+                ON position_snapshots(address, snapshot_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_position_address_coin_side_snapshot
+                ON position_snapshots(address, coin, side, snapshot_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_position_snapshot
+                ON position_snapshots(snapshot_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_funding_asset_snapshot
+                ON funding_snapshots(asset, snapshot_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_alerts_type_key_sent
+                ON alerts_sent(alert_type, key, sent_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_wallet_performance_address_snapshot
+                ON wallet_performance_snapshots(address, snapshot_at DESC);
+        """)
+
+
+# --------------------------- writes (W3: datetime('now')) ---------------------------
+def save_leaderboard(rows: list[dict]) -> None:
+    with get_conn() as conn:
+        for rank, row in enumerate(rows, start=1):
+            perfs = dict(row["windowPerformances"])
+            conn.execute(
+                """INSERT INTO leaderboard_snapshots
+                   (address, rank, account_value, day_pnl, week_pnl, snapshot_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+                (
+                    row["ethAddress"],
+                    rank,
+                    float(row["accountValue"]),
+                    float(perfs.get("day", {}).get("pnl", 0)),
+                    float(perfs.get("week", {}).get("pnl", 0)),
+                ),
+            )
+
+
+def save_positions(address: str, positions: list[dict]) -> None:
+    with get_conn() as conn:
+        for pos in positions:
+            conn.execute(
+                """INSERT INTO position_snapshots
+                   (address, coin, side, size, notional_usd, entry_px, liq_px, unrealized_pnl, snapshot_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                (
+                    address,
+                    pos["coin"],
+                    pos["side"],
+                    pos["size"],
+                    pos["notional_usd"],
+                    pos["entry_px"],
+                    pos.get("liq_px", 0),
+                    pos["unrealized_pnl"],
+                ),
+            )
+
+
+def save_funding(assets: list[dict]) -> None:
+    with get_conn() as conn:
+        for a in assets:
+            conn.execute(
+                """INSERT INTO funding_snapshots
+                   (asset, funding_rate, open_interest, mark_px, snapshot_at)
+                   VALUES (?, ?, ?, ?, datetime('now'))""",
+                (a["name"], a["funding"], a["open_interest"], a["mark_px"]),
+            )
+
+
+def save_wallet_performance_snapshot(
+    address: str, account_value: float, exposure_total: float, open_upnl: float,
+    negative_upnl: float, open_positions: int, book_leverage: float, state: str,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO wallet_performance_snapshots
+               (address, account_value, exposure_total, open_upnl, negative_upnl,
+                open_positions, book_leverage, state, snapshot_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (address.lower(), account_value, exposure_total, open_upnl,
+             negative_upnl, open_positions, book_leverage, state),
+        )
+
+
+# --------------------------- reads ---------------------------
+def get_latest_wallet_performance(address: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM wallet_performance_snapshots
+               WHERE address = ? ORDER BY snapshot_at DESC LIMIT 1""",
+            (address.lower(),),
+        ).fetchone()
+
+
+def get_previous_positions(address: str) -> list[sqlite3.Row]:
+    """W4 fix: most-recent prior snapshot per (coin, side) for this address."""
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT ps.* FROM position_snapshots ps
+               INNER JOIN (
+                   SELECT coin, side, MAX(snapshot_at) AS latest_at
+                   FROM position_snapshots WHERE address = ?
+                   GROUP BY coin, side
+               ) m ON ps.coin = m.coin AND ps.side = m.side
+                  AND ps.snapshot_at = m.latest_at
+               WHERE ps.address = ?""",
+            (address, address),
+        ).fetchall()
+
+
+def get_latest_position_snapshot_at(address: str) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(snapshot_at) AS latest_at FROM position_snapshots WHERE address = ?",
+            (address,),
+        ).fetchone()
+    return row["latest_at"] if row else None
+
+
+def get_previous_funding(asset: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM funding_snapshots
+               WHERE asset = ? ORDER BY snapshot_at DESC LIMIT 1""",
+            (asset,),
+        ).fetchone()
+
+
+def get_funding_ago(asset: str, minutes: int = 60) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM funding_snapshots
+               WHERE asset = ? AND snapshot_at <= datetime('now', ?)
+               ORDER BY snapshot_at DESC LIMIT 1""",
+            (asset, f"-{minutes} minutes"),
+        ).fetchone()
+
+
+def get_recent_positions_for_addresses(addresses: list[str], window_minutes: int = 10) -> list[sqlite3.Row]:
+    if not addresses:
+        return []
+    placeholders = ",".join("?" * len(addresses))
+    with get_conn() as conn:
+        return conn.execute(
+            f"""SELECT ps.* FROM position_snapshots ps
+                INNER JOIN (
+                    SELECT address, MAX(snapshot_at) AS latest_at
+                    FROM position_snapshots
+                    WHERE address IN ({placeholders})
+                      AND snapshot_at > datetime('now', '-{window_minutes} minutes')
+                    GROUP BY address
+                ) latest ON ps.address = latest.address
+                         AND ps.snapshot_at = latest.latest_at
+                WHERE ps.notional_usd >= ?""",
+            (*addresses, 500_000),
+        ).fetchall()
+
+
+# --------------------------- alert dedup ledger ---------------------------
+def alert_already_sent(alert_type: str, key: str, cooldown_minutes: int = 60) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT sent_at FROM alerts_sent
+               WHERE alert_type = ? AND key = ? AND sent_at > datetime('now', ?)
+               ORDER BY sent_at DESC LIMIT 1""",
+            (alert_type, key, f"-{cooldown_minutes} minutes"),
+        ).fetchone()
+    return row is not None
+
+
+def get_recent_alerts_by_prefix(alert_type: str, key_prefix: str, cooldown_minutes: int = 60) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT key, sent_at FROM alerts_sent
+               WHERE alert_type = ? AND key LIKE ? AND sent_at > datetime('now', ?)
+               ORDER BY sent_at DESC""",
+            (alert_type, f"{key_prefix}%", f"-{cooldown_minutes} minutes"),
+        ).fetchall()
+
+
+def record_alert(alert_type: str, key: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO alerts_sent (alert_type, key, sent_at) VALUES (?, ?, datetime('now'))",
+            (alert_type, key),
+        )
+
+
+# --------------------------- wallet labels ---------------------------
+def set_wallet_label(address: str, label: str, name: str = None, notes: str = None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO wallet_labels (address, label, name, notes, tagged_at)
+               VALUES (?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(address) DO UPDATE SET
+                 label=excluded.label, name=excluded.name,
+                 notes=excluded.notes, tagged_at=excluded.tagged_at""",
+            (address.lower(), label, name, notes),
+        )
+
+
+def get_wallet_label(address: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM wallet_labels WHERE address = ?", (address.lower(),)
+        ).fetchone()
+
+
+def get_all_labels() -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM wallet_labels ORDER BY label, address").fetchall()
+
+
+def get_watch_wallets() -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM wallet_labels
+               WHERE label IN ('watch', 'stress_watch', 'vip')
+               ORDER BY label, address"""
+        ).fetchall()
+
+
+def is_algo(address: str) -> bool:
+    row = get_wallet_label(address)
+    return row is not None and row["label"] == "algo"
+
+
+def is_vip(address: str) -> bool:
+    row = get_wallet_label(address)
+    return row is not None and row["label"] == "vip"
+
+
+# --------------------------- subscribers (toggle) ---------------------------
+def activate_chat(chat_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO subscribers (chat_id, active, alerts_enabled, updated_at)
+               VALUES (?, 1, 1, datetime('now'))
+               ON CONFLICT(chat_id) DO UPDATE SET active=1, updated_at=datetime('now')""",
+            (chat_id,),
+        )
+
+
+def deactivate_chat(chat_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE subscribers SET active=0, updated_at=datetime('now') WHERE chat_id=?",
+            (chat_id,),
+        )
+
+
+def set_alerts_enabled(chat_id: int, enabled: bool) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE subscribers SET alerts_enabled=?, updated_at=datetime('now') WHERE chat_id=?",
+            (1 if enabled else 0, chat_id),
+        )
+
+
+def get_alerts_enabled(chat_id: int) -> bool:
+    with get_conn() as conn:
+        r = conn.execute(
+            "SELECT alerts_enabled FROM subscribers WHERE chat_id=? AND active=1", (chat_id,)
+        ).fetchone()
+    return bool(r["alerts_enabled"]) if r else False
+
+
+def get_active_chats() -> list[int]:
+    with get_conn() as conn:
+        return [r["chat_id"] for r in conn.execute(
+            "SELECT chat_id FROM subscribers WHERE active=1"
+        ).fetchall()]
+
+
+def get_alert_chats() -> list[int]:
+    with get_conn() as conn:
+        return [r["chat_id"] for r in conn.execute(
+            "SELECT chat_id FROM subscribers WHERE active=1 AND alerts_enabled=1"
+        ).fetchall()]
+
+
+def is_any_active() -> bool:
+    return len(get_active_chats()) > 0
+
+
+# --------------------------- app_state kv ---------------------------
+def set_state(key: str, value: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO app_state (key, value, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (key, value),
+        )
+
+
+def get_state(key: str) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM app_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+# --------------------------- retention (W5) ---------------------------
+def prune_old_data(days: int | None = None) -> None:
+    days = config.RETENTION_DAYS if days is None else days
+    cutoff = f"-{days} days"
+    with get_conn() as conn:
+        for table in (
+            "leaderboard_snapshots", "position_snapshots",
+            "funding_snapshots", "wallet_performance_snapshots", "alerts_sent",
+        ):
+            ts_col = "sent_at" if table == "alerts_sent" else "snapshot_at"
+            conn.execute(f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)", (cutoff,))
