@@ -3,6 +3,9 @@
 Changes from the original: uses aiohttp instead of blocking requests, no stdout
 dumps of raw responses, key/model/timeout come from config. Keeps the local
 deterministic fallback when the API key is absent or the call fails.
+
+Auth/credit failures (401/403) from x.ai are surfaced to Telegram once every
+6h so a dead/empty key doesn't silently degrade the bot to fallback forever.
 """
 import json
 import logging
@@ -11,6 +14,8 @@ from typing import Any
 import aiohttp
 
 import config
+from storage import database as db
+from bot import telegram as tg
 
 log = logging.getLogger(__name__)
 XAI_URL = "https://api.x.ai/v1/chat/completions"
@@ -27,6 +32,20 @@ def _extract_mark(d: dict[str, Any]) -> float:
         except (ValueError, TypeError):
             continue
     return 0.0
+
+
+async def _notify_key_problem(status: int) -> None:
+    """Tell Telegram the x.ai key needs attention. Deduped to once / 6h."""
+    if db.alert_already_sent("grok_key", "auth", cooldown_minutes=360):
+        return
+    reason = "invalid / unauthorized" if status == 401 else "forbidden — likely out of credits"
+    await tg.broadcast(text=(
+        "⚠️ <b>Grok API key problem</b>\n"
+        f"x.ai returned <b>{status}</b> ({reason}).\n"
+        "Setups are running on the local fallback (no LLM rationale).\n"
+        "→ Add credits / rotate the key at console.x.ai, then restart."
+    ))
+    db.record_alert("grok_key", "auth")
 
 
 def _fallback_setup(coin, direction, entry, stop, targets, score, d) -> dict:
@@ -140,6 +159,10 @@ async def generate_setups(discoveries: list[dict]) -> list[dict]:
                     prompt = _build_prompt(coin, context, direction, entry, stop, targets, score)
                     setup = await _call_grok(session, prompt)
                     setup["score"] = score
+                except aiohttp.ClientResponseError as e:
+                    log.warning("Grok fallback for %s: %s", coin, e)
+                    if e.status in (401, 403):
+                        await _notify_key_problem(e.status)
                 except Exception as e:
                     log.warning("Grok fallback for %s: %s", coin, e)
             if setup is None:
