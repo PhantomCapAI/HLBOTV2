@@ -22,6 +22,21 @@ SCAN_TFS = ("1h", "4h")
 EXTREME_FUNDING_HR = 0.0003   # ~0.03%/hr; above this the funded side is "crowded"
 
 
+async def _dexs_to_scan() -> list[str]:
+    """Which builder dexs to include. [] = crypto only (default)."""
+    if not getattr(config, "ENABLE_BUILDER_DEXS", False):
+        return []
+    if config.BUILDER_DEXS:
+        return config.BUILDER_DEXS
+    try:
+        found = await hl.get_perp_dexs()
+        log.info("Builder dexs discovered: %s", found)
+        return found
+    except Exception as e:
+        log.warning("perpDexs discovery failed: %s", e)
+        return []
+
+
 def calculate_confluence_score(reads: dict, funding: float = 0.0) -> float:
     primary = reads["4h"]
     score = 0.0
@@ -45,14 +60,18 @@ async def _fetch_screen(coin: str, timeframes=SCAN_TFS) -> dict:
 
 
 async def run_scan() -> list[dict]:
-    meta, ctxs = await hl.get_meta_and_ctxs()
+    dexs = await _dexs_to_scan()
+    meta, ctxs = await hl.get_all_meta_and_ctxs(dexs) if dexs else await hl.get_meta_and_ctxs()
     candidates = []
     for i, asset in enumerate(meta):
         coin, ctx = asset["name"], ctxs[i]
+        is_builder = ":" in coin
+        min_vol = config.BUILDER_MIN_VOLUME if is_builder else MIN_VOLUME
+        min_oi = config.BUILDER_MIN_OI if is_builder else MIN_OI_USD
         day_vol = float(ctx.get("dayNtlVlm") or 0)
         mark = float(ctx.get("markPx") or 0)
         oi_usd = float(ctx.get("openInterest") or 0) * mark
-        if day_vol < MIN_VOLUME or oi_usd < MIN_OI_USD:
+        if day_vol < min_vol or oi_usd < min_oi:
             continue
         candidates.append((coin, ctx))
 
@@ -102,7 +121,8 @@ async def _fetch_live(coin: str, ctx: dict) -> tuple[dict, dict]:
 async def deep_dive(discoveries: list[dict]) -> list[dict]:
     if not discoveries:
         return []
-    meta, ctxs = await hl.get_meta_and_ctxs()
+    dexs = await _dexs_to_scan()
+    meta, ctxs = await hl.get_all_meta_and_ctxs(dexs) if dexs else await hl.get_meta_and_ctxs()
     ctx_by_name = {asset["name"]: ctxs[i] for i, asset in enumerate(meta)}
     enriched = []
     for d in discoveries:
@@ -137,3 +157,47 @@ async def deep_dive(discoveries: list[dict]) -> list[dict]:
         except Exception as e:
             log.warning("  deep-dive failed for %s: %s: %s", coin, type(e).__name__, e)
     return enriched
+
+
+async def scan_one(symbol: str) -> dict | None:
+    """Score a single requested coin directly (for /coin), across all scanned dexs.
+
+    Searches the FULL universe (not just the top-N shortlist) and tolerates
+    user input like "$TSLA", "tsla", or "BTC-PERP". Returns None only if the
+    symbol genuinely isn't listed or has no usable candle history.
+    """
+    symbol = symbol.upper().lstrip("$").replace("-PERP", "").strip()
+    dexs = await _dexs_to_scan()
+    meta, ctxs = await hl.get_all_meta_and_ctxs(dexs) if dexs else await hl.get_meta_and_ctxs()
+
+    def bare(n: str) -> str:
+        return n.split(":", 1)[1] if ":" in n else n
+
+    idx = next(
+        (i for i, a in enumerate(meta)
+         if a["name"].upper() == symbol or bare(a["name"]).upper() == symbol),
+        None,
+    )
+    if idx is None:  # substring fallback (e.g. "PEPE" -> "kPEPE")
+        idx = next((i for i, a in enumerate(meta) if symbol in a["name"].upper()), None)
+    if idx is None:
+        return None
+
+    coin, ctx = meta[idx]["name"], ctxs[idx]
+    try:
+        frames = await _fetch_screen(coin, SCAN_TFS)
+        reads = {tf: analyse_tf(tf, frames[tf]) for tf in SCAN_TFS}
+    except Exception as e:
+        log.warning("scan_one failed for %s: %s", coin, e)
+        return None
+
+    return {
+        "coin": coin,
+        "score": calculate_confluence_score(reads, float(ctx.get("funding") or 0)),
+        "regime_4h": reads["4h"].regime,
+        "lean_4h": reads["4h"].lean,
+        "adx_4h": round(reads["4h"].adx, 1),
+        "direction": "long" if reads["4h"].lean > 0 else "short" if reads["4h"].lean < 0 else "none",
+        "funding": float(ctx.get("funding") or 0),
+        "oi_usd": float(ctx.get("openInterest") or 0) * float(ctx.get("markPx") or 0),
+    }
