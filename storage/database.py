@@ -92,6 +92,7 @@ def init_db() -> None:
                 open_positions INTEGER NOT NULL,
                 book_leverage REAL NOT NULL,
                 state TEXT NOT NULL,
+                health_score REAL NOT NULL DEFAULT 50,
                 snapshot_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS subscribers (
@@ -108,6 +109,10 @@ def init_db() -> None:
         """)
         try:
             conn.execute("ALTER TABLE position_snapshots ADD COLUMN liq_px REAL NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE wallet_performance_snapshots ADD COLUMN health_score REAL NOT NULL DEFAULT 50")
         except Exception:
             pass
         conn.executescript("""
@@ -181,15 +186,16 @@ def save_funding(assets: list[dict]) -> None:
 def save_wallet_performance_snapshot(
     address: str, account_value: float, exposure_total: float, open_upnl: float,
     negative_upnl: float, open_positions: int, book_leverage: float, state: str,
+    health_score: float = 50.0,
 ) -> None:
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO wallet_performance_snapshots
                (address, account_value, exposure_total, open_upnl, negative_upnl,
-                open_positions, book_leverage, state, snapshot_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                open_positions, book_leverage, state, health_score, snapshot_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
             (address.lower(), account_value, exposure_total, open_upnl,
-             negative_upnl, open_positions, book_leverage, state),
+             negative_upnl, open_positions, book_leverage, state, health_score),
         )
 
 
@@ -201,6 +207,22 @@ def get_latest_wallet_performance(address: str) -> sqlite3.Row | None:
                WHERE address = ? ORDER BY snapshot_at DESC LIMIT 1""",
             (address.lower(),),
         ).fetchone()
+
+
+def get_latest_scores(limit: int = 200) -> list[sqlite3.Row]:
+    """Latest health snapshot per wallet, ranked best -> worst."""
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT w.* FROM wallet_performance_snapshots w
+               INNER JOIN (
+                   SELECT address, MAX(snapshot_at) AS latest
+                   FROM wallet_performance_snapshots
+                   GROUP BY address
+               ) m ON w.address = m.address AND w.snapshot_at = m.latest
+               ORDER BY w.health_score DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
 
 
 def get_previous_positions(address: str) -> list[sqlite3.Row]:
