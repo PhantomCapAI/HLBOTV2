@@ -177,6 +177,24 @@ def wallet_performance_snapshot(account_value: float, positions: list[dict]) -> 
     }
 
 
+def wallet_health_score(current: dict, state: str) -> float:
+    """0-100 current-health score. State sets the backbone; magnitude nudges it.
+
+    NOTE: this is a CURRENT-STATE gauge (open uPnL + leverage), not a track
+    record. A wallet deep underwater scores low even if it's historically good.
+    """
+    base = {
+        "hot_streak": 85, "heating_up": 68, "stable": 50,
+        "cooling_off": 38, "implosion_watch": 22, "self_imploding": 8,
+        "flat": 50,
+    }.get(state, 50)
+    av = current.get("account_value") or 1
+    upnl_pct = (current.get("open_upnl", 0) / av) * 100
+    lev = current.get("book_leverage", 0)
+    score = base + max(-10, min(10, upnl_pct * 0.4)) - max(0, (lev - 5) * 1.5)
+    return round(max(0.0, min(100.0, score)), 1)
+
+
 def classify_wallet_performance(current: dict, previous) -> tuple[str, str]:
     account_value = current["account_value"]
     open_upnl = current["open_upnl"]
@@ -219,7 +237,8 @@ async def check_wallet_performance_health(
     current = wallet_performance_snapshot(account_value, positions)
     previous = get_latest_wallet_performance(address)
     state, reason = classify_wallet_performance(current, previous)
-    save_wallet_performance_snapshot(address=address, state=state, **current)
+    score = wallet_health_score(current, state)
+    save_wallet_performance_snapshot(address=address, state=state, health_score=score, **current)
 
     if seed_mode or previous is None:
         return
