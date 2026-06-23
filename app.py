@@ -49,7 +49,9 @@ def main() -> None:
     app.add_handler(CommandHandler("coin", h.coin_cmd))
     app.add_handler(CommandHandler("wallets", h.wallets_cmd))
     app.add_handler(CommandHandler("confluence", h.confluence_cmd))
+    app.add_handler(CommandHandler("dexs", h.dexs_cmd))
     app.add_handler(CommandHandler("status", h.status_cmd))
+    app.add_handler(CommandHandler("scores", h.scores_cmd))
     app.add_handler(CommandHandler("help", h.help_cmd))
 
     jq = app.job_queue
