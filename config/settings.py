@@ -61,6 +61,15 @@ HL_WEIGHT_HEADROOM = _f("HL_WEIGHT_HEADROOM", 0.85)
 WALLET_SCAN_INTERVAL_SECONDS = _i("WALLET_SCAN_INTERVAL_SECONDS", 180)
 COIN_SCAN_INTERVAL_SECONDS = _i("COIN_SCAN_INTERVAL_SECONDS", 300)
 
+# ---- Builder-deployed perps (HIP-3): equities / metals / FX ----
+# Off by default. When on, the coin scanner also sweeps builder dexs.
+ENABLE_BUILDER_DEXS = _b("ENABLE_BUILDER_DEXS", False)
+# Comma-separated dex-name whitelist (recommended). Empty => auto-discover all.
+BUILDER_DEXS = [d.strip() for d in os.getenv("BUILDER_DEXS", "").split(",") if d.strip()]
+# Builder markets are thinner than crypto, so they get their own liquidity floors.
+BUILDER_MIN_VOLUME = _f("BUILDER_MIN_VOLUME", 250_000)
+BUILDER_MIN_OI = _f("BUILDER_MIN_OI", 100_000)
+
 # ---- Coin scanner / setups ----
 ACCOUNT_EQUITY = _f("ACCOUNT_EQUITY", 5000.0)
 RISK_PCT = _f("RISK_PCT", 0.01)
