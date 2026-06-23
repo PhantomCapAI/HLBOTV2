@@ -133,3 +133,56 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(BANNER, parse_mode="HTML")
+
+
+async def dexs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List builder-deployed (HIP-3) perp dexs and their symbols (equities/metals/FX)."""
+    from integrations import hyperliquid as hl
+    await update.message.reply_text("🔎 Querying builder perp dexs...")
+    try:
+        dexs = await hl.get_perp_dexs()
+    except Exception as e:
+        await update.message.reply_text(f"perpDexs error: {str(e)[:150]}")
+        return
+    if not dexs:
+        await update.message.reply_text("No builder perp dexs found (crypto-only universe).")
+        return
+    lines = []
+    for d in dexs:
+        try:
+            uni, _ = await hl.get_meta_and_ctxs(d)
+            coins = ", ".join(a["name"].split(":", 1)[-1] for a in uni[:40])
+            lines.append(f"<b>{d}</b>: {coins or '(no assets)'}")
+        except Exception as e:
+            lines.append(f"<b>{d}</b>: (error {str(e)[:40]})")
+    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
+
+
+async def scores_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rank tracked wallets by current health score (best -> worst)."""
+    rows = db.get_latest_scores()
+    if not rows:
+        await update.message.reply_text(
+            "No wallet scores yet. Give it a wallet-scan cycle or two after /start."
+        )
+        return
+
+    def line(r) -> str:
+        score = r["health_score"]
+        dot = "🟢" if score >= 70 else ("⚪" if score >= 40 else "🔴")
+        addr = r["address"]
+        short = f"{addr[:6]}…{addr[-4:]}"
+        upnl = r["open_upnl"] or 0
+        upnl_s = f"+${upnl:,.0f}" if upnl >= 0 else f"-${abs(upnl):,.0f}"
+        return f"{dot} <code>{short}</code> — <b>{score:.0f}</b> {r['state']}  {upnl_s}"
+
+    out = ["📊 <b>Wallet Health Scores</b> (current)"]
+    if len(rows) <= 30:
+        out += [line(r) for r in rows]
+    else:
+        out.append("<b>Top 20</b>")
+        out += [line(r) for r in rows[:20]]
+        out.append("\n<b>Weakest 8</b>")
+        out += [line(r) for r in rows[-8:]]
+    out.append("\n<i>Current-state health, not a win-rate / track record.</i>")
+    await update.message.reply_text("\n".join(out), parse_mode="HTML")
