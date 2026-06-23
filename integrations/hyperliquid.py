@@ -179,11 +179,43 @@ async def get_funding_and_oi() -> list[dict]:
 
 
 # --------------------------- coin-scanner endpoints ---------------------------
-async def get_meta_and_ctxs() -> tuple[list, list]:
-    """Raw (universe, ctxs) for the coin scanner's liquidity filter."""
+async def get_perp_dexs() -> list[str]:
+    """Names of builder-deployed (HIP-3) perp dexs. Excludes the default crypto dex."""
     async with aiohttp.ClientSession(timeout=_client_timeout()) as session:
-        data = await _post_with_backoff(session, {"type": "metaAndAssetCtxs"})
-    return data[0]["universe"], data[1]
+        data = await _post_with_backoff(session, {"type": "perpDexs"})
+    return [d["name"] for d in (data or []) if isinstance(d, dict) and d.get("name")]
+
+
+async def get_meta_and_ctxs(dex: str = "") -> tuple[list, list]:
+    """Raw (universe, ctxs) for the coin scanner's liquidity filter.
+
+    dex="" -> core crypto perp dex. dex="<name>" -> a builder-deployed dex,
+    whose asset names are qualified to 'dex:COIN' so candle/book calls route right.
+    """
+    body = {"type": "metaAndAssetCtxs"}
+    if dex:
+        body["dex"] = dex
+    async with aiohttp.ClientSession(timeout=_client_timeout()) as session:
+        data = await _post_with_backoff(session, body)
+    universe, ctxs = data[0]["universe"], data[1]
+    if dex:
+        for a in universe:
+            if ":" not in a["name"]:
+                a["name"] = f"{dex}:{a['name']}"
+    return universe, ctxs
+
+
+async def get_all_meta_and_ctxs(dexs: list[str]) -> tuple[list, list]:
+    """Core crypto dex plus each builder dex in `dexs`, merged into one aligned (universe, ctxs)."""
+    universe, ctxs = await get_meta_and_ctxs("")
+    for dex in dexs:
+        try:
+            u, c = await get_meta_and_ctxs(dex)
+            universe += u
+            ctxs += c
+        except Exception as e:
+            log.warning("meta fetch failed for builder dex %s: %s", dex, e)
+    return universe, ctxs
 
 
 async def get_candles(coin: str, interval: str, start_ms: int, end_ms: int) -> list[dict]:
