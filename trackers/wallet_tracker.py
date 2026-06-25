@@ -327,85 +327,135 @@ async def check_whale_positions(
     alerts_sent_this_cycle = 0
 
     for fallback_rank, row in enumerate(leaderboard, start=1):
-        address = row["ethAddress"]
+        address = row.get("ethAddress")
         rank = row.get("rank", fallback_rank)
-
-        # Skip confirmed algo wallets — they generate noise not signal
-        if is_algo(address):
-            log.debug(f"Skipping algo wallet #{rank} {address[:10]}")
+        if not address:
+            log.warning("Skipping leaderboard row #%s with no ethAddress", fallback_rank)
             continue
 
-        current_positions = positions_by_address.get(address)
-        if current_positions is None:
-            continue
+        try:
+            if is_algo(address):
+                log.debug(f"Skipping algo wallet #{rank} {address[:10]}")
+                continue
 
-        perfs = dict(row["windowPerformances"])
-        account_value = float(row["accountValue"])
-        day_pnl = float(perfs.get("day", {}).get("pnl", 0))
+            current_positions = positions_by_address.get(address)
+            if current_positions is None:
+                continue
 
-        wallet_info = get_wallet_label(address)
-        latest_position_snapshot_at = get_latest_position_snapshot_at(address)
-        inactive_hours = hours_since_snapshot(latest_position_snapshot_at)
-        whale_reactivated = (
-            is_reactivation_candidate(wallet_info)
-            and (
-                inactive_hours is None
-                or inactive_hours >= WHALE_REACTIVATION_LOOKBACK_HOURS
+            perfs = dict(row.get("windowPerformances", {}) or {})
+            account_value = float(row.get("accountValue", 0) or 0)
+            day_pnl = float(perfs.get("day", {}).get("pnl", 0))
+
+            wallet_info = get_wallet_label(address)
+            latest_position_snapshot_at = get_latest_position_snapshot_at(address)
+            inactive_hours = hours_since_snapshot(latest_position_snapshot_at)
+            whale_reactivated = (
+                is_reactivation_candidate(wallet_info)
+                and (
+                    inactive_hours is None
+                    or inactive_hours >= WHALE_REACTIVATION_LOOKBACK_HOURS
+                )
             )
-        )
-        reactivation_alert_sent = False
+            reactivation_alert_sent = False
 
-        prev_rows = get_previous_positions(address)
-        prev_by_key = {f"{r['coin']}:{r['side']}": r for r in prev_rows}
+            prev_rows = get_previous_positions(address)
+            prev_by_key = {f"{r['coin']}:{r['side']}": r for r in prev_rows}
 
-        save_positions(address, current_positions)
-        await check_wallet_performance_health(
-            row=row,
-            address=address,
-            rank=rank,
-            positions=current_positions,
-            account_value=account_value,
-            seed_mode=seed_mode,
-        )
+            save_positions(address, current_positions)
+            await check_wallet_performance_health(
+                row=row,
+                address=address,
+                rank=rank,
+                positions=current_positions,
+                account_value=account_value,
+                seed_mode=seed_mode,
+            )
 
-        if seed_mode:
-            continue
-
-        for pos in current_positions:
-            if alerts_sent_this_cycle >= MAX_WHALE_ALERTS_PER_CYCLE:
-                break
-            allowed_tokens = allowed_watch_tokens(row)
-            if allowed_tokens and pos["coin"].upper() not in allowed_tokens:
-                continue
-            watch_floor = watch_min_notional_change(row)
-            threshold = watch_floor if watch_floor > 0 else config.WHALE_POSITION_THRESHOLD_USD
-            if pos["notional_usd"] < threshold:
+            if seed_mode:
                 continue
 
-            position_key = f"{pos['coin']}:{pos['side']}"
-            current_px = mark_prices.get(pos["coin"], 0.0)
-
-            if whale_reactivated and reactivation_alert_sent:
-                continue
-
-            if whale_reactivated and not reactivation_alert_sent:
-                alert_key = f"whale:reactivation:{address}:{pos['coin']}:{pos['side']}"
-                if alert_already_sent(
-                    "whale_reactivation",
-                    alert_key,
-                    cooldown_minutes=WHALE_REACTIVATION_COOLDOWN_MINUTES,
-                ):
-                    reactivation_alert_sent = True
+            for pos in current_positions:
+                if alerts_sent_this_cycle >= MAX_WHALE_ALERTS_PER_CYCLE:
+                    break
+                allowed_tokens = allowed_watch_tokens(row)
+                if allowed_tokens and pos["coin"].upper() not in allowed_tokens:
+                    continue
+                watch_floor = watch_min_notional_change(row)
+                threshold = watch_floor if watch_floor > 0 else config.WHALE_POSITION_THRESHOLD_USD
+                if pos["notional_usd"] < threshold:
                     continue
 
-                else:
-                    caption = whale_reactivation_alert(
-                        rank=rank, address=address, coin=pos["coin"],
-                        side=pos["side"], notional_usd=pos["notional_usd"],
-                        account_value=account_value, day_pnl=day_pnl,
-                        profile=wallet_profile_text(wallet_info),
-                        inactive_for=format_inactive_for(inactive_hours),
-                    )
+                position_key = f"{pos['coin']}:{pos['side']}"
+                current_px = mark_prices.get(pos["coin"], 0.0)
+
+                if whale_reactivated and reactivation_alert_sent:
+                    continue
+
+                if whale_reactivated and not reactivation_alert_sent:
+                    alert_key = f"whale:reactivation:{address}:{pos['coin']}:{pos['side']}"
+                    if alert_already_sent(
+                        "whale_reactivation",
+                        alert_key,
+                        cooldown_minutes=WHALE_REACTIVATION_COOLDOWN_MINUTES,
+                    ):
+                        reactivation_alert_sent = True
+                        continue
+
+                    else:
+                        caption = whale_reactivation_alert(
+                            rank=rank, address=address, coin=pos["coin"],
+                            side=pos["side"], notional_usd=pos["notional_usd"],
+                            account_value=account_value, day_pnl=day_pnl,
+                            profile=wallet_profile_text(wallet_info),
+                            inactive_for=format_inactive_for(inactive_hours),
+                        )
+                        chart = await generate_whale_chart(
+                            coin=pos["coin"], side=pos["side"], rank=rank,
+                            notional=pos["notional_usd"], entry_px=pos["entry_px"],
+                            account_value=account_value, day_pnl=day_pnl,
+                            address=address, current_px=current_px,
+                        )
+                        sent = await safe_send_photo(chart, caption, paid_only=True) if chart else await safe_send(caption, paid_only=True)
+                        if sent:
+                            record_alert("whale_reactivation", alert_key)
+                            alerts_sent_this_cycle += 1
+                            reactivation_alert_sent = True
+                            log.info(
+                                "Whale reactivation [PRO]: #%s %s %s $%s after %s",
+                                rank,
+                                pos["coin"],
+                                pos["side"],
+                                f"{pos['notional_usd']:,.0f}",
+                                format_inactive_for(inactive_hours),
+                            )
+                            await asyncio.sleep(3)
+                            continue
+                        continue
+
+                if position_key not in prev_by_key:
+                    # New position open
+                    alert_key = f"whale:new:{address}:{pos['coin']}:{pos['side']}"
+                    if alert_already_sent("whale", alert_key, cooldown_minutes=240):
+                        continue
+
+                    wallet_is_vip = wallet_info and wallet_info["label"] == "vip"
+
+                    if wallet_is_vip:
+                        strategy = wallet_info["notes"] or "Top-tier wallet"
+                        rank_str = wallet_info["name"] or f"#{rank}"
+                        caption = vip_whale_alert(
+                            rank=rank_str, address=address, coin=pos["coin"],
+                            side=pos["side"], notional_usd=pos["notional_usd"],
+                            account_value=account_value, day_pnl=day_pnl,
+                            strategy=strategy,
+                        )
+                    else:
+                        caption = whale_alert(
+                            rank=rank, address=address, coin=pos["coin"],
+                            side=pos["side"], notional_usd=pos["notional_usd"],
+                            account_value=account_value, day_pnl=day_pnl,
+                        )
+
                     chart = await generate_whale_chart(
                         coin=pos["coin"], side=pos["side"], rank=rank,
                         notional=pos["notional_usd"], entry_px=pos["entry_px"],
@@ -414,123 +464,79 @@ async def check_whale_positions(
                     )
                     sent = await safe_send_photo(chart, caption, paid_only=True) if chart else await safe_send(caption, paid_only=True)
                     if sent:
-                        record_alert("whale_reactivation", alert_key)
+                        record_alert("whale", alert_key)
                         alerts_sent_this_cycle += 1
-                        reactivation_alert_sent = True
-                        log.info(
-                            "Whale reactivation [PRO]: #%s %s %s $%s after %s",
+                        tier = "VIP" if wallet_is_vip else "PRO"
+                        log.info(f"Whale new [{tier}]: #{rank} {pos['coin']} {pos['side']} ${pos['notional_usd']:,.0f}")
+                        await asyncio.sleep(3)
+
+                else:
+                    # Existing position — check for size increase
+                    prev_notional = prev_by_key[position_key]["notional_usd"]
+                    if prev_notional <= 0:
+                        continue
+                    pct_increase = ((pos["notional_usd"] - prev_notional) / prev_notional) * 100
+                    if pct_increase < SIZE_INCREASE_THRESHOLD_PCT:
+                        continue
+                    if pos["notional_usd"] - prev_notional < watch_min_notional_change(row):
+                        continue
+
+                    alert_key = f"whale:add:{address}:{pos['coin']}:{pos['side']}:{round(pos['notional_usd'], -4)}"
+                    if alert_already_sent("whale_add", alert_key, cooldown_minutes=120):
+                        continue
+
+                    semantic_prefix = f"whale:add:{address}:{pos['coin']}:{pos['side']}:"
+                    recent_adds = get_recent_alerts_by_prefix(
+                        "whale_add",
+                        semantic_prefix,
+                        cooldown_minutes=WHALE_ADD_SEMANTIC_COOLDOWN_MINUTES,
+                    )
+                    recent_keys = [row["key"] for row in recent_adds]
+                    if recent_keys and not is_material_whale_add_since_last_alert(pos["notional_usd"], recent_keys):
+                        log.debug(
+                            "Skipping repeated whale add: #%s %s %s $%s",
                             rank,
                             pos["coin"],
                             pos["side"],
                             f"{pos['notional_usd']:,.0f}",
-                            format_inactive_for(inactive_hours),
                         )
-                        await asyncio.sleep(3)
                         continue
-                    continue
 
-            if position_key not in prev_by_key:
-                # New position open
-                alert_key = f"whale:new:{address}:{pos['coin']}:{pos['side']}"
-                if alert_already_sent("whale", alert_key, cooldown_minutes=240):
-                    continue
-
-                wallet_is_vip = wallet_info and wallet_info["label"] == "vip"
-
-                if wallet_is_vip:
-                    strategy = wallet_info["notes"] or "Top-tier wallet"
-                    rank_str = wallet_info["name"] or f"#{rank}"
-                    caption = vip_whale_alert(
-                        rank=rank_str, address=address, coin=pos["coin"],
-                        side=pos["side"], notional_usd=pos["notional_usd"],
+                    if should_use_stress_watch(pos, current_px):
+                        caption = whale_stress_watch_alert(
+                            rank=rank, address=address, coin=pos["coin"],
+                            side=pos["side"], notional_usd=pos["notional_usd"],
+                            prev_notional=prev_notional, pct_increase=pct_increase,
+                            account_value=account_value, day_pnl=day_pnl,
+                            unrealized_pnl=pos["unrealized_pnl"],
+                            entry_px=pos["entry_px"], curr_px=current_px,
+                            liq_px=pos.get("liq_px", 0),
+                        )
+                        alert_log_type = "Whale stress watch"
+                    else:
+                        caption = whale_size_increase_alert(
+                            rank=rank, address=address, coin=pos["coin"],
+                            side=pos["side"], notional_usd=pos["notional_usd"],
+                            prev_notional=prev_notional, pct_increase=pct_increase,
+                            account_value=account_value, day_pnl=day_pnl,
+                        )
+                        alert_log_type = "Whale add"
+                    chart = await generate_whale_chart(
+                        coin=pos["coin"], side=pos["side"], rank=rank,
+                        notional=pos["notional_usd"], entry_px=pos["entry_px"],
                         account_value=account_value, day_pnl=day_pnl,
-                        strategy=strategy,
+                        address=address, current_px=current_px,
                     )
-                else:
-                    caption = whale_alert(
-                        rank=rank, address=address, coin=pos["coin"],
-                        side=pos["side"], notional_usd=pos["notional_usd"],
-                        account_value=account_value, day_pnl=day_pnl,
-                    )
-
-                chart = await generate_whale_chart(
-                    coin=pos["coin"], side=pos["side"], rank=rank,
-                    notional=pos["notional_usd"], entry_px=pos["entry_px"],
-                    account_value=account_value, day_pnl=day_pnl,
-                    address=address, current_px=current_px,
-                )
-                sent = await safe_send_photo(chart, caption, paid_only=True) if chart else await safe_send(caption, paid_only=True)
-                if sent:
-                    record_alert("whale", alert_key)
-                    alerts_sent_this_cycle += 1
-                    tier = "VIP" if wallet_is_vip else "PRO"
-                    log.info(f"Whale new [{tier}]: #{rank} {pos['coin']} {pos['side']} ${pos['notional_usd']:,.0f}")
-                    await asyncio.sleep(3)
-
-            else:
-                # Existing position — check for size increase
-                prev_notional = prev_by_key[position_key]["notional_usd"]
-                if prev_notional <= 0:
-                    continue
-                pct_increase = ((pos["notional_usd"] - prev_notional) / prev_notional) * 100
-                if pct_increase < SIZE_INCREASE_THRESHOLD_PCT:
-                    continue
-                if pos["notional_usd"] - prev_notional < watch_min_notional_change(row):
-                    continue
-
-                alert_key = f"whale:add:{address}:{pos['coin']}:{pos['side']}:{round(pos['notional_usd'], -4)}"
-                if alert_already_sent("whale_add", alert_key, cooldown_minutes=120):
-                    continue
-
-                semantic_prefix = f"whale:add:{address}:{pos['coin']}:{pos['side']}:"
-                recent_adds = get_recent_alerts_by_prefix(
-                    "whale_add",
-                    semantic_prefix,
-                    cooldown_minutes=WHALE_ADD_SEMANTIC_COOLDOWN_MINUTES,
-                )
-                recent_keys = [row["key"] for row in recent_adds]
-                if recent_keys and not is_material_whale_add_since_last_alert(pos["notional_usd"], recent_keys):
-                    log.debug(
-                        "Skipping repeated whale add: #%s %s %s $%s",
-                        rank,
-                        pos["coin"],
-                        pos["side"],
-                        f"{pos['notional_usd']:,.0f}",
-                    )
-                    continue
-
-                if should_use_stress_watch(pos, current_px):
-                    caption = whale_stress_watch_alert(
-                        rank=rank, address=address, coin=pos["coin"],
-                        side=pos["side"], notional_usd=pos["notional_usd"],
-                        prev_notional=prev_notional, pct_increase=pct_increase,
-                        account_value=account_value, day_pnl=day_pnl,
-                        unrealized_pnl=pos["unrealized_pnl"],
-                        entry_px=pos["entry_px"], curr_px=current_px,
-                        liq_px=pos.get("liq_px", 0),
-                    )
-                    alert_log_type = "Whale stress watch"
-                else:
-                    caption = whale_size_increase_alert(
-                        rank=rank, address=address, coin=pos["coin"],
-                        side=pos["side"], notional_usd=pos["notional_usd"],
-                        prev_notional=prev_notional, pct_increase=pct_increase,
-                        account_value=account_value, day_pnl=day_pnl,
-                    )
-                    alert_log_type = "Whale add"
-                chart = await generate_whale_chart(
-                    coin=pos["coin"], side=pos["side"], rank=rank,
-                    notional=pos["notional_usd"], entry_px=pos["entry_px"],
-                    account_value=account_value, day_pnl=day_pnl,
-                    address=address, current_px=current_px,
-                )
-                # Pro only — size increase is a premium signal
-                sent = await safe_send_photo(chart, caption, paid_only=True) if chart else await safe_send(caption, paid_only=True)
-                if sent:
-                    record_alert("whale_add", alert_key)
-                    alerts_sent_this_cycle += 1
-                    log.info(f"{alert_log_type} [PRO]: #{rank} {pos['coin']} {pos['side']} +{pct_increase:.0f}%")
-                    await asyncio.sleep(3)
+                    # Pro only — size increase is a premium signal
+                    sent = await safe_send_photo(chart, caption, paid_only=True) if chart else await safe_send(caption, paid_only=True)
+                    if sent:
+                        record_alert("whale_add", alert_key)
+                        alerts_sent_this_cycle += 1
+                        log.info(f"{alert_log_type} [PRO]: #{rank} {pos['coin']} {pos['side']} +{pct_increase:.0f}%")
+                        await asyncio.sleep(3)
+        except Exception as e:
+            log.error("Whale scan error for %s: %s", address[:10] if address else "?", e, exc_info=True)
+            continue
 
 
 async def check_whale_confluence(leaderboard: list[dict], assets: list[dict], seed_mode: bool) -> None:
