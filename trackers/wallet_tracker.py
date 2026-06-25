@@ -377,7 +377,9 @@ async def check_whale_positions(
             allowed_tokens = allowed_watch_tokens(row)
             if allowed_tokens and pos["coin"].upper() not in allowed_tokens:
                 continue
-            if pos["notional_usd"] < config.WHALE_POSITION_THRESHOLD_USD:
+            watch_floor = watch_min_notional_change(row)
+            threshold = watch_floor if watch_floor > 0 else config.WHALE_POSITION_THRESHOLD_USD
+            if pos["notional_usd"] < threshold:
                 continue
 
             position_key = f"{pos['coin']}:{pos['side']}"
