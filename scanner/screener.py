@@ -22,6 +22,21 @@ SCAN_TFS = ("1h", "4h")
 EXTREME_FUNDING_HR = 0.0003   # ~0.03%/hr; above this the funded side is "crowded"
 
 
+def suggest_leverage(entry: float, atr: float, score: float, max_lev: int) -> int:
+    """Volatility- and conviction-aware leverage, clamped to the asset's max.
+
+    Calmer asset (low ATR%) and higher confluence score -> more leverage.
+    Never exceeds the asset's on-chain maxLeverage or a hard 25x ceiling.
+    """
+    if entry <= 0 or atr <= 0:
+        return min(3, max_lev)
+    atr_pct = (atr / entry) * 100
+    vol_lev = max(2.0, min(20.0, 10.0 / atr_pct))      # ~1% ATR -> 10x, ~5% -> 2x
+    conviction = max(0.5, min(1.25, score / 80.0))      # score 80 -> x1.0
+    lev = vol_lev * conviction
+    return int(max(1, min(round(lev), max_lev, 25)))
+
+
 async def _dexs_to_scan() -> list[str]:
     """Which builder dexs to include. [] = crypto only (default)."""
     if not getattr(config, "ENABLE_BUILDER_DEXS", False):
@@ -124,6 +139,7 @@ async def deep_dive(discoveries: list[dict]) -> list[dict]:
     dexs = await _dexs_to_scan()
     meta, ctxs = await hl.get_all_meta_and_ctxs(dexs) if dexs else await hl.get_meta_and_ctxs()
     ctx_by_name = {asset["name"]: ctxs[i] for i, asset in enumerate(meta)}
+    maxlev_by_name = {asset["name"]: int(asset.get("maxLeverage", 3) or 3) for asset in meta}
     enriched = []
     for d in discoveries:
         coin = d["coin"]
@@ -138,7 +154,7 @@ async def deep_dive(discoveries: list[dict]) -> list[dict]:
             entry = p.close
             risk_usd, stop_dist, units, notional = position_sizing(entry, p.atr)
             side = -1 if p.lean < 0 else 1
-            lev = config.CONFIG.leverage.get(coin, config.CONFIG.leverage["default"])
+            lev = suggest_leverage(entry, p.atr, d["score"], maxlev_by_name.get(coin, 3))
             d2 = dict(d)
             d2.update({
                 "micro": micro,
