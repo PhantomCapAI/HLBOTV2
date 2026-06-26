@@ -115,6 +115,21 @@ def init_db() -> None:
             conn.execute("ALTER TABLE wallet_performance_snapshots ADD COLUMN health_score REAL NOT NULL DEFAULT 50")
         except Exception:
             pass
+        # --- pay-to-activate migrations (idempotent) ---
+        try:
+            # entitlement expiry; null = never paid / not entitled.
+            conn.execute("ALTER TABLE subscribers ADD COLUMN paid_until TEXT")
+        except Exception:
+            pass
+        try:
+            # replay protection: each tx signature can be redeemed at most once.
+            conn.execute("""CREATE TABLE IF NOT EXISTS used_payments (
+                tx_signature TEXT PRIMARY KEY,
+                chat_id INTEGER,
+                used_at TEXT
+            )""")
+        except Exception:
+            pass
         conn.executescript("""
             CREATE INDEX IF NOT EXISTS idx_leaderboard_address_snapshot
                 ON leaderboard_snapshots(address, snapshot_at DESC);
@@ -399,21 +414,75 @@ def get_alerts_enabled(chat_id: int) -> bool:
 
 
 def get_active_chats() -> list[int]:
+    # "Active" now means: switched on AND holding a live paid_until entitlement,
+    # so background work and alerts are driven by payment, not just the toggle.
     with get_conn() as conn:
         return [r["chat_id"] for r in conn.execute(
-            "SELECT chat_id FROM subscribers WHERE active=1"
+            """SELECT chat_id FROM subscribers
+               WHERE active=1 AND paid_until IS NOT NULL
+                 AND datetime(paid_until) > datetime('now')"""
         ).fetchall()]
 
 
 def get_alert_chats() -> list[int]:
     with get_conn() as conn:
         return [r["chat_id"] for r in conn.execute(
-            "SELECT chat_id FROM subscribers WHERE active=1 AND alerts_enabled=1"
+            """SELECT chat_id FROM subscribers
+               WHERE active=1 AND alerts_enabled=1 AND paid_until IS NOT NULL
+                 AND datetime(paid_until) > datetime('now')"""
         ).fetchall()]
 
 
 def is_any_active() -> bool:
     return len(get_active_chats()) > 0
+
+
+# --------------------------- pay-to-activate (entitlement + replay) ---------------------------
+def set_paid_until(chat_id: int, iso: str) -> None:
+    """Set/extend the chat's entitlement expiry (ISO-8601 timestamp)."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO subscribers (chat_id, active, alerts_enabled, paid_until, updated_at)
+               VALUES (?, 1, 1, ?, datetime('now'))
+               ON CONFLICT(chat_id) DO UPDATE SET
+                 paid_until=excluded.paid_until, updated_at=datetime('now')""",
+            (chat_id, iso),
+        )
+
+
+def get_paid_until(chat_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT paid_until FROM subscribers WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+    return row["paid_until"] if row else None
+
+
+def mark_payment_used(tx_signature: str, chat_id: int) -> None:
+    """Record a redeemed tx signature (replay protection). Idempotent."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO used_payments (tx_signature, chat_id, used_at)
+               VALUES (?, ?, datetime('now'))""",
+            (tx_signature, chat_id),
+        )
+
+
+def is_payment_used(tx_signature: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM used_payments WHERE tx_signature=?", (tx_signature,)
+        ).fetchone()
+    return row is not None
+
+
+def mark_free_used(chat_id: int) -> None:
+    """Mark this chat's one free /scan as consumed (app_state kv — no active state)."""
+    set_state(f"free_used:{chat_id}", "1")
+
+
+def get_free_used(chat_id: int) -> bool:
+    return get_state(f"free_used:{chat_id}") == "1"
 
 
 # --------------------------- app_state kv ---------------------------
