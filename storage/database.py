@@ -295,6 +295,25 @@ def get_previous_positions(address: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def get_last_snapshot_positions(address: str) -> list[sqlite3.Row]:
+    """All open positions from the single most-recent snapshot batch for a wallet.
+
+    Unlike get_previous_positions (latest-per-(coin,side) ever, which keeps stale
+    long-closed coins around), this is exactly the previous cycle's holdings — the
+    correct baseline for close/flip detection, so a coin closed cycles ago is not
+    repeatedly re-reported. Call this BEFORE save_positions for the new cycle.
+    """
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT ps.* FROM position_snapshots ps
+               WHERE ps.address = ?
+                 AND ps.snapshot_at = (
+                     SELECT MAX(snapshot_at) FROM position_snapshots WHERE address = ?
+                 )""",
+            (address, address),
+        ).fetchall()
+
+
 def get_latest_position_snapshot_at(address: str) -> str | None:
     with get_conn() as conn:
         row = conn.execute(

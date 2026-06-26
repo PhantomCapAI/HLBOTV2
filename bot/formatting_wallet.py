@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from utils.fmt import fmt, fmt_price
+
 
 def _rank_line(rank) -> str:
     if isinstance(rank, int):
@@ -79,6 +81,109 @@ def whale_size_increase_alert(rank: int, address: str, coin: str, side: str,
     )
 
 
+def whale_open_new_alert(rank: int, address: str, coin: str, side: str,
+                         notional_usd: float, account_value: float, day_pnl: float) -> str:
+    """A grown-from-nothing position: report absolute size, no (noisy) percentage."""
+    side_emoji = "🟢" if side == "long" else "🔴"
+    direction = "LONG" if side == "long" else "SHORT"
+    pnl_str = f"+${day_pnl:,.0f}" if day_pnl >= 0 else f"-${abs(day_pnl):,.0f}"
+    return (
+        f"🐋🆕 <b>WHALE OPENED NEW — Hyperliquid</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{side_emoji} <b>{coin}-PERP</b> | {direction}\n"
+        f"📊 Size: <b>${notional_usd:,.0f}</b>\n"
+        f"{_rank_line(rank)}"
+        f"💰 Account: ${account_value:,.0f}\n"
+        f"📈 Day PnL: {pnl_str}\n"
+        f"🔑 <code>{address[:6]}...{address[-4:]}</code>\n"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
+def whale_closed_alert(rank: int, address: str, coin: str, side: str,
+                       closed_size: float, closed_notional: float, reduction_pct: float,
+                       full: bool, remaining_notional: float,
+                       account_value: float, day_pnl: float, curr_px: float = 0.0) -> str:
+    """The missing other half of WHALE ADDING — a position closed or gutted."""
+    side_emoji = "🟢" if side == "long" else "🔴"
+    direction = "LONG" if side == "long" else "SHORT"
+    pnl_str = f"+${day_pnl:,.0f}" if day_pnl >= 0 else f"-${abs(day_pnl):,.0f}"
+    headline = "Closed position" if full else f"Cut {reduction_pct:.0f}% of position"
+    remaining_line = "" if full else f"📉 Remaining: ${remaining_notional:,.0f}\n"
+    px_line = f"📍 Price: ${fmt_price(curr_px)}\n" if curr_px else ""
+    return (
+        f"🐋❌ <b>WHALE CLOSED — Hyperliquid</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{side_emoji} <b>{coin}-PERP</b> | was {direction}\n"
+        f"🚪 {headline}\n"
+        f"➖ Closed: <b>${closed_notional:,.0f}</b> ({fmt(closed_size)} {coin})\n"
+        f"{remaining_line}"
+        f"{px_line}"
+        f"{_rank_line(rank)}"
+        f"💰 Account: ${account_value:,.0f}\n"
+        f"📈 Day PnL: {pnl_str}\n"
+        f"🔑 <code>{address[:6]}...{address[-4:]}</code>\n"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
+def whale_flipped_alert(rank: int, address: str, coin: str, old_side: str, new_side: str,
+                        new_notional: float, new_size: float, account_value: float,
+                        day_pnl: float, entry_px: float = 0.0, curr_px: float = 0.0) -> str:
+    """A side reversal — a strong signal, surfaced on its own."""
+    old_dir = "LONG" if old_side == "long" else "SHORT"
+    new_dir = "LONG" if new_side == "long" else "SHORT"
+    new_emoji = "🟢" if new_side == "long" else "🔴"
+    pnl_str = f"+${day_pnl:,.0f}" if day_pnl >= 0 else f"-${abs(day_pnl):,.0f}"
+    px_line = ""
+    if entry_px or curr_px:
+        px_line = f"🎯 Entry: ${fmt_price(entry_px)} | Current: ${fmt_price(curr_px)}\n"
+    return (
+        f"🔄 <b>WHALE FLIPPED — {coin}-PERP</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{new_emoji} <b>{old_dir} → {new_dir}</b>\n"
+        f"📊 New size: <b>${new_notional:,.0f}</b> ({fmt(new_size)} {coin})\n"
+        f"{px_line}"
+        f"{_rank_line(rank)}"
+        f"💰 Account: ${account_value:,.0f}\n"
+        f"📈 Day PnL: {pnl_str}\n"
+        f"🔑 <code>{address[:6]}...{address[-4:]}</code>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"<b>Read:</b> the wallet reversed direction — conviction change, not a trim.\n"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
+def whale_trimmed_alert(rank: int, address: str, coin: str, side: str,
+                        reduction_pct: float, new_notional: float, prev_notional: float,
+                        account_value: float, day_pnl: float) -> str:
+    """Significant partial reduction that isn't a full close (opt-in, lower priority)."""
+    side_emoji = "🟢" if side == "long" else "🔴"
+    direction = "LONG" if side == "long" else "SHORT"
+    pnl_str = f"+${day_pnl:,.0f}" if day_pnl >= 0 else f"-${abs(day_pnl):,.0f}"
+    return (
+        f"🐋✂️ <b>WHALE TRIMMED — Hyperliquid</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{side_emoji} <b>{coin}-PERP</b> | {direction}\n"
+        f"➖ Reduced: <b>{reduction_pct:.0f}%</b>\n"
+        f"📊 New size: <b>${new_notional:,.0f}</b>\n"
+        f"📉 Was: ${prev_notional:,.0f}\n"
+        f"{_rank_line(rank)}"
+        f"💰 Account: ${account_value:,.0f}\n"
+        f"📈 Day PnL: {pnl_str}\n"
+        f"🔑 <code>{address[:6]}...{address[-4:]}</code>\n"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
 def whale_stress_watch_alert(rank: int, address: str, coin: str, side: str,
                              notional_usd: float, prev_notional: float,
                              pct_increase: float, account_value: float,
@@ -100,7 +205,7 @@ def whale_stress_watch_alert(rank: int, address: str, coin: str, side: str,
     if liq_px > 0 and curr_px > 0:
         dist_pct = abs(((liq_px - curr_px) / curr_px) * 100)
         liq_line = (
-            f"💀 Liq: <b>${liq_px:,.4g}</b> "
+            f"💀 Liq: <b>${fmt_price(liq_px)}</b> "
             f"({dist_pct:.1f}% {move_dir})\n"
         )
 
@@ -111,7 +216,7 @@ def whale_stress_watch_alert(rank: int, address: str, coin: str, side: str,
         f"📊 Position: <b>${notional_usd:,.0f}</b>\n"
         f"➕ Added: <b>${added:,.0f}</b> (+{pct_increase:.0f}%)\n"
         f"📉 uPnL: <b>{upnl_str}</b>\n"
-        f"🎯 Entry: ${entry_px:,.4g} | Current: ${curr_px:,.4g}\n"
+        f"🎯 Entry: ${fmt_price(entry_px)} | Current: ${fmt_price(curr_px)}\n"
         f"{liq_line}"
         f"💰 Account: ${account_value:,.0f}\n"
         f"📈 Day PnL: {pnl_str}\n"

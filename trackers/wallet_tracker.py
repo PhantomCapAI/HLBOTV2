@@ -6,6 +6,7 @@ from telegram.error import RetryAfter
 
 from storage.database import (
     get_previous_positions,
+    get_last_snapshot_positions,
     get_latest_position_snapshot_at,
     get_recent_positions_for_addresses,
     get_latest_wallet_performance,
@@ -25,6 +26,10 @@ from bot.formatting_wallet import (
     whale_alert,
     vip_whale_alert,
     whale_size_increase_alert,
+    whale_open_new_alert,
+    whale_closed_alert,
+    whale_flipped_alert,
+    whale_trimmed_alert,
     whale_stress_watch_alert,
     whale_reactivation_alert,
     wallet_performance_alert,
@@ -173,6 +178,52 @@ def looks_like_market_maker(positions: list[dict],
             f"net/gross {d['net_gross_ratio']:.2f}"
         )
     return False, ""
+
+
+def is_tiny_base(prev_notional: float, current_notional: float,
+                 floor_usd: float, floor_pct: float) -> bool:
+    """True when the prior position was negligible vs the new one.
+
+    Used so a grow-from-nothing move is reported as OPENED NEW rather than a
+    meaningless "+6939%". Tiny if prev is under an absolute floor, or under a
+    small fraction of the new size.
+    """
+    if prev_notional < floor_usd:
+        return True
+    if current_notional > 0 and prev_notional < (floor_pct / 100.0) * current_notional:
+        return True
+    return False
+
+
+def diff_positions(prev_by_coin: dict, current_by_coin: dict, *,
+                   close_pct: float, trim_pct: float, trim_enabled: bool) -> list[dict]:
+    """The other half of the add-detection diff: closes, flips, and trims.
+
+    Compares the previous cycle's holdings (one row per coin) against the current
+    ones. Size-based (not notional) so price moves don't masquerade as exits.
+    Returns events: {type: close|flip|trim, coin, prev, curr, ...}.
+    """
+    events: list[dict] = []
+    for coin, prev in prev_by_coin.items():
+        prev_size = float(prev["size"])
+        if prev_size <= 0:
+            continue
+        curr = current_by_coin.get(coin)
+        if curr is None:
+            events.append({"type": "close", "coin": coin, "prev": prev, "curr": None,
+                           "reduction_pct": 100.0, "full": True})
+            continue
+        if curr["side"] != prev["side"]:
+            events.append({"type": "flip", "coin": coin, "prev": prev, "curr": curr})
+            continue
+        reduction = -((float(curr["size"]) - prev_size) / prev_size) * 100.0
+        if reduction >= close_pct:
+            events.append({"type": "close", "coin": coin, "prev": prev, "curr": curr,
+                           "reduction_pct": reduction, "full": False})
+        elif trim_enabled and reduction >= trim_pct:
+            events.append({"type": "trim", "coin": coin, "prev": prev, "curr": curr,
+                           "reduction_pct": reduction})
+    return events
 
 
 def parse_alert_notional(alert_key: str) -> float | None:
@@ -488,6 +539,18 @@ async def check_whale_positions(
             prev_by_key = {f"{r['coin']}:{r['side']}": r for r in prev_rows}
             stress_add = wallet_added_under_stress(current_positions, prev_by_key, day_pnl)
 
+            # Close/flip/trim diff against the *immediately previous* cycle (not
+            # latest-per-coin-ever), so closed coins aren't re-reported forever.
+            prev_cycle_by_coin = {r["coin"]: r for r in get_last_snapshot_positions(address)}
+            current_by_coin = {p["coin"]: p for p in current_positions}
+            diff_events = diff_positions(
+                prev_cycle_by_coin, current_by_coin,
+                close_pct=config.WHALE_CLOSE_PCT,
+                trim_pct=config.WHALE_TRIM_PCT,
+                trim_enabled=config.WHALE_TRIM_ENABLED,
+            )
+            flipped_coins = {e["coin"] for e in diff_events if e["type"] == "flip"}
+
             save_positions(address, current_positions)
             await check_wallet_performance_health(
                 row=row,
@@ -561,6 +624,10 @@ async def check_whale_positions(
                         continue
 
                 if position_key not in prev_by_key:
+                    # A reversal lands here (new side wasn't held before) but is a
+                    # FLIP, not a fresh open — let the flip pass handle it.
+                    if pos["coin"] in flipped_coins:
+                        continue
                     # New position open
                     alert_key = f"whale:new:{address}:{pos['coin']}:{pos['side']}"
                     if alert_already_sent("whale", alert_key, cooldown_minutes=240):
@@ -607,6 +674,32 @@ async def check_whale_positions(
                     if pct_increase < SIZE_INCREASE_THRESHOLD_PCT:
                         continue
                     if pos["notional_usd"] - prev_notional < watch_min_notional_change(row):
+                        continue
+
+                    if is_tiny_base(prev_notional, pos["notional_usd"],
+                                    config.WHALE_TINY_BASE_USD, config.WHALE_TINY_BASE_PCT):
+                        # Grow-from-nothing → OPENED NEW (absolute size, no % noise).
+                        alert_key = f"whale:new:{address}:{pos['coin']}:{pos['side']}"
+                        if alert_already_sent("whale", alert_key, cooldown_minutes=240):
+                            continue
+                        caption = whale_open_new_alert(
+                            rank=rank, address=address, coin=pos["coin"], side=pos["side"],
+                            notional_usd=pos["notional_usd"],
+                            account_value=account_value, day_pnl=day_pnl,
+                        )
+                        chart = await generate_whale_chart(
+                            coin=pos["coin"], side=pos["side"], rank=rank,
+                            notional=pos["notional_usd"], entry_px=pos["entry_px"],
+                            account_value=account_value, day_pnl=day_pnl,
+                            address=address, current_px=current_px,
+                        )
+                        sent = await safe_send_photo(chart, caption, paid_only=True) if chart else await safe_send(caption, paid_only=True)
+                        if sent:
+                            record_alert("whale", alert_key)
+                            alerts_sent_this_cycle += 1
+                            log.info("Whale opened-new [PRO]: #%s %s %s $%s",
+                                     rank, pos["coin"], pos["side"], f"{pos['notional_usd']:,.0f}")
+                            await asyncio.sleep(3)
                         continue
 
                     alert_key = f"whale:add:{address}:{pos['coin']}:{pos['side']}:{round(pos['notional_usd'], -4)}"
@@ -661,6 +754,89 @@ async def check_whale_positions(
                         record_alert("whale_add", alert_key)
                         alerts_sent_this_cycle += 1
                         log.info(f"{alert_log_type} [PRO]: #{rank} {pos['coin']} {pos['side']} +{pct_increase:.0f}%")
+                        await asyncio.sleep(3)
+
+            # --- Exit / flip / trim pass (the other half of WHALE ADDING) ---
+            allowed_tokens = allowed_watch_tokens(row)
+            watch_floor = watch_min_notional_change(row)
+            exit_threshold = watch_floor if watch_floor > 0 else config.WHALE_POSITION_THRESHOLD_USD
+            for ev in diff_events:
+                if alerts_sent_this_cycle >= MAX_WHALE_ALERTS_PER_CYCLE:
+                    break
+                coin = ev["coin"]
+                if allowed_tokens and coin.upper() not in allowed_tokens:
+                    continue
+                prev = ev["prev"]
+                curr = ev["curr"]
+                prev_notional = float(prev["notional_usd"])
+                curr_notional = float(curr["notional_usd"]) if curr else 0.0
+                exit_px = mark_prices.get(coin, 0.0)
+
+                if ev["type"] == "flip":
+                    if max(prev_notional, curr_notional) < exit_threshold:
+                        continue
+                    alert_key = f"whale:flip:{address}:{coin}:{curr['side']}"
+                    if alert_already_sent("whale_flip", alert_key,
+                                          cooldown_minutes=config.WHALE_EXIT_COOLDOWN_MINUTES):
+                        continue
+                    caption = whale_flipped_alert(
+                        rank=rank, address=address, coin=coin,
+                        old_side=prev["side"], new_side=curr["side"],
+                        new_notional=curr_notional, new_size=float(curr["size"]),
+                        account_value=account_value, day_pnl=day_pnl,
+                        entry_px=float(curr["entry_px"]), curr_px=exit_px,
+                    )
+                    if await safe_send(caption, paid_only=True):
+                        record_alert("whale_flip", alert_key)
+                        alerts_sent_this_cycle += 1
+                        log.info("Whale flip [PRO]: #%s %s %s->%s $%s",
+                                 rank, coin, prev["side"], curr["side"], f"{curr_notional:,.0f}")
+                        await asyncio.sleep(3)
+
+                elif ev["type"] == "close":
+                    if prev_notional < exit_threshold:
+                        continue
+                    side = prev["side"]
+                    alert_key = f"whale:closed:{address}:{coin}:{side}"
+                    if alert_already_sent("whale_closed", alert_key,
+                                          cooldown_minutes=config.WHALE_EXIT_COOLDOWN_MINUTES):
+                        continue
+                    prev_size = float(prev["size"])
+                    curr_size = float(curr["size"]) if curr else 0.0
+                    closed_size = max(prev_size - curr_size, 0.0)
+                    closed_notional = (closed_size / prev_size) * prev_notional if prev_size else prev_notional
+                    caption = whale_closed_alert(
+                        rank=rank, address=address, coin=coin, side=side,
+                        closed_size=closed_size, closed_notional=closed_notional,
+                        reduction_pct=ev["reduction_pct"], full=ev["full"],
+                        remaining_notional=curr_notional,
+                        account_value=account_value, day_pnl=day_pnl, curr_px=exit_px,
+                    )
+                    if await safe_send(caption, paid_only=True):
+                        record_alert("whale_closed", alert_key)
+                        alerts_sent_this_cycle += 1
+                        log.info("Whale closed [PRO]: #%s %s %s -%.0f%% $%s",
+                                 rank, coin, side, ev["reduction_pct"], f"{closed_notional:,.0f}")
+                        await asyncio.sleep(3)
+
+                elif ev["type"] == "trim":
+                    if prev_notional < exit_threshold:
+                        continue
+                    side = prev["side"]
+                    alert_key = f"whale:trim:{address}:{coin}:{side}:{round(curr_notional, -4)}"
+                    if alert_already_sent("whale_trim", alert_key,
+                                          cooldown_minutes=config.WHALE_EXIT_COOLDOWN_MINUTES):
+                        continue
+                    caption = whale_trimmed_alert(
+                        rank=rank, address=address, coin=coin, side=side,
+                        reduction_pct=ev["reduction_pct"], new_notional=curr_notional,
+                        prev_notional=prev_notional, account_value=account_value, day_pnl=day_pnl,
+                    )
+                    if await safe_send(caption, paid_only=True):
+                        record_alert("whale_trim", alert_key)
+                        alerts_sent_this_cycle += 1
+                        log.info("Whale trim [PRO]: #%s %s %s -%.0f%%",
+                                 rank, coin, side, ev["reduction_pct"])
                         await asyncio.sleep(3)
         except Exception as e:
             log.error("Whale scan error for %s: %s", address[:10] if address else "?", e, exc_info=True)

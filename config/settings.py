@@ -100,6 +100,19 @@ PAYMENT_VALIDITY_DAYS = _i("PAYMENT_VALIDITY_DAYS", 3)
 # the free taste). 0 disables the bypass.
 OWNER_CHAT_ID = _i("OWNER_CHAT_ID", 0)
 
+# ---- Whale exit / flip / trim detection (the other half of WHALE ADDING) ----
+# A tracked position that shrinks past CLOSE_PCT (of size) — or vanishes — fires
+# WHALE CLOSED; a side reversal fires WHALE FLIPPED. Trims (partial reductions in
+# the TRIM_PCT..CLOSE_PCT band) are off by default to avoid spam.
+WHALE_CLOSE_PCT = _f("WHALE_CLOSE_PCT", 80.0)          # size shrink >= this % = a close
+WHALE_TRIM_ENABLED = _b("WHALE_TRIM_ENABLED", False)   # alert on partial trims at all
+WHALE_TRIM_PCT = _f("WHALE_TRIM_PCT", 30.0)            # lower bound of the trim band
+WHALE_EXIT_COOLDOWN_MINUTES = _i("WHALE_EXIT_COOLDOWN_MINUTES", 240)
+# Tiny-base fix: when a prior position was negligible, "+6939%" is noise — relabel
+# the add as OPENED NEW (absolute size, no percentage).
+WHALE_TINY_BASE_USD = _f("WHALE_TINY_BASE_USD", 5_000.0)   # prev notional below this = tiny
+WHALE_TINY_BASE_PCT = _f("WHALE_TINY_BASE_PCT", 5.0)       # ...or below this % of the new size
+
 # ---- Correlation (wallet x technical confluence) ----
 CORRELATION_MIN_SCORE = _f("CORRELATION_MIN_SCORE", 60.0)
 CORRELATION_MIN_WHALES = _i("CORRELATION_MIN_WHALES", 2)
