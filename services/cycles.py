@@ -100,16 +100,18 @@ async def _wallet_cycle(seed_mode: bool = False) -> None:
     label = "seed" if seed_mode else "wallet-scan"
     log.info("Starting %s cycle...", label)
     try:
-        leaderboard, assets = await asyncio.gather(
+        leaderboard_full, assets = await asyncio.gather(
             hl.get_leaderboard(top_n=50),
             hl.get_funding_and_oi(),
         )
-        db.save_leaderboard(leaderboard)
+        db.save_leaderboard(leaderboard_full)
         db.save_funding(assets)
 
         await wt.check_funding_spikes(assets, seed_mode)
         await wt.check_oi_surges(assets, seed_mode)
 
+        # Track/alert only on skilled wallets: drop negative trailing-week ROI.
+        leaderboard = wt.filter_by_performance(leaderboard_full)
         top50 = [row["ethAddress"] for row in leaderboard[:50]]
         watch_rows = manual_watch_rows(set(top50))
         watch_addresses = [row["ethAddress"] for row in watch_rows]
@@ -142,6 +144,7 @@ def _format_confluence(m: dict) -> str:
         f"{side_emoji} <b>{m['coin']} {m['side'].upper()}</b>\n"
         f"📊 Technical score: <b>{m['score']}</b>\n"
         f"🐋 Whales aligned: <b>{m['whales']}</b> (${m['total_notional']:,.0f})\n"
+        f"🧠 Combined smart score: <b>{m.get('smart', 0.0):+.1f}</b>\n"
         f"━━━━━━━━━━━━━━━━\n\n"
     )
     return head + format_setup(m["setup"])

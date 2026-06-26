@@ -93,6 +93,7 @@ def init_db() -> None:
                 book_leverage REAL NOT NULL,
                 state TEXT NOT NULL,
                 health_score REAL NOT NULL DEFAULT 50,
+                smart_score REAL NOT NULL DEFAULT 0,
                 snapshot_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS subscribers (
@@ -113,6 +114,11 @@ def init_db() -> None:
             pass
         try:
             conn.execute("ALTER TABLE wallet_performance_snapshots ADD COLUMN health_score REAL NOT NULL DEFAULT 50")
+        except Exception:
+            pass
+        try:
+            # smart_score: skill-weighted ranking (trailing ROI minus risk penalties).
+            conn.execute("ALTER TABLE wallet_performance_snapshots ADD COLUMN smart_score REAL NOT NULL DEFAULT 0")
         except Exception:
             pass
         # --- pay-to-activate migrations (idempotent) ---
@@ -201,16 +207,16 @@ def save_funding(assets: list[dict]) -> None:
 def save_wallet_performance_snapshot(
     address: str, account_value: float, exposure_total: float, open_upnl: float,
     negative_upnl: float, open_positions: int, book_leverage: float, state: str,
-    health_score: float = 50.0,
+    health_score: float = 50.0, smart_score: float = 0.0,
 ) -> None:
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO wallet_performance_snapshots
                (address, account_value, exposure_total, open_upnl, negative_upnl,
-                open_positions, book_leverage, state, health_score, snapshot_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                open_positions, book_leverage, state, health_score, smart_score, snapshot_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
             (address.lower(), account_value, exposure_total, open_upnl,
-             negative_upnl, open_positions, book_leverage, state, health_score),
+             negative_upnl, open_positions, book_leverage, state, health_score, smart_score),
         )
 
 
@@ -225,7 +231,7 @@ def get_latest_wallet_performance(address: str) -> sqlite3.Row | None:
 
 
 def get_latest_scores(limit: int = 200) -> list[sqlite3.Row]:
-    """Latest health snapshot per wallet, ranked best -> worst."""
+    """Latest snapshot per wallet, ranked best -> worst by smart_score (skill)."""
     with get_conn() as conn:
         return conn.execute(
             """SELECT w.* FROM wallet_performance_snapshots w
@@ -234,10 +240,30 @@ def get_latest_scores(limit: int = 200) -> list[sqlite3.Row]:
                    FROM wallet_performance_snapshots
                    GROUP BY address
                ) m ON w.address = m.address AND w.snapshot_at = m.latest
-               ORDER BY w.health_score DESC
+               ORDER BY w.smart_score DESC, w.health_score DESC
                LIMIT ?""",
             (limit,),
         ).fetchall()
+
+
+def get_latest_smart_scores(addresses: list[str]) -> dict[str, float]:
+    """Latest smart_score per address (lower-cased keys). Missing → absent."""
+    addrs = [a.lower() for a in addresses]
+    if not addrs:
+        return {}
+    placeholders = ",".join("?" * len(addrs))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT w.address, w.smart_score FROM wallet_performance_snapshots w
+                INNER JOIN (
+                    SELECT address, MAX(snapshot_at) AS latest
+                    FROM wallet_performance_snapshots
+                    WHERE address IN ({placeholders})
+                    GROUP BY address
+                ) m ON w.address = m.address AND w.snapshot_at = m.latest""",
+            addrs,
+        ).fetchall()
+    return {r["address"]: (r["smart_score"] if r["smart_score"] is not None else 0.0) for r in rows}
 
 
 def get_previous_positions(address: str) -> list[sqlite3.Row]:

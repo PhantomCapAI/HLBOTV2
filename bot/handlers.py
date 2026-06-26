@@ -258,15 +258,19 @@ async def scores_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     def line(r) -> str:
-        score = r["health_score"]
-        dot = "🟢" if score >= 70 else ("⚪" if score >= 40 else "🔴")
+        smart = r["smart_score"] if "smart_score" in r.keys() else 0.0
+        smart = smart or 0.0
+        dot = "🟢" if smart >= 10 else ("⚪" if smart >= 0 else "🔴")
         addr = r["address"]
         short = f"{addr[:6]}…{addr[-4:]}"
         upnl = r["open_upnl"] or 0
         upnl_s = f"+${upnl:,.0f}" if upnl >= 0 else f"-${abs(upnl):,.0f}"
-        return f"{dot} <code>{short}</code> — <b>{score:.0f}</b> {r['state']}  {upnl_s}"
+        return (
+            f"{dot} <code>{short}</code> — 🧠 <b>{smart:+.1f}</b>"
+            f" · health {r['health_score']:.0f} {r['state']}  {upnl_s}"
+        )
 
-    out = ["📊 <b>Wallet Health Scores</b> (current)"]
+    out = ["📊 <b>Wallet Smart Scores</b> (skill-ranked)"]
     if len(rows) <= 30:
         out += [line(r) for r in rows]
     else:
@@ -274,5 +278,8 @@ async def scores_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         out += [line(r) for r in rows[:20]]
         out.append("\n<b>Weakest 8</b>")
         out += [line(r) for r in rows[-8:]]
-    out.append("\n<i>Current-state health, not a win-rate / track record.</i>")
+    out.append(
+        "\n<i>Smart score = trailing week+month ROI, minus penalties for high "
+        "leverage and adding while red. Not a guarantee or trade advice.</i>"
+    )
     await update.message.reply_text("\n".join(out), parse_mode="HTML")

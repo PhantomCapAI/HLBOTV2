@@ -13,27 +13,43 @@ log = logging.getLogger(__name__)
 
 
 def current_wallet_confluence(window_minutes: int = 15, min_notional: float | None = None) -> list[dict]:
+    """Aggregate current tracked-wallet positioning per (coin, side).
+
+    Ranked by wallet count, then by combined smart_score (skill) rather than
+    combined notional — so a cluster of skilled wallets outranks a cluster of
+    merely large ones.
+    """
     min_notional = config.WHALE_POSITION_THRESHOLD_USD if min_notional is None else min_notional
     with db.get_conn() as conn:
         rows = conn.execute(
-            f"""SELECT coin, side, COUNT(*) AS cnt, SUM(notional_usd) AS tot FROM (
-                    SELECT ps.coin, ps.side, ps.address, ps.notional_usd
-                    FROM position_snapshots ps
-                    INNER JOIN (
-                        SELECT address, MAX(snapshot_at) AS latest
-                        FROM position_snapshots
-                        WHERE snapshot_at > datetime('now', '-{int(window_minutes)} minutes')
-                        GROUP BY address
-                    ) m ON ps.address = m.address AND ps.snapshot_at = m.latest
-                    WHERE ps.notional_usd >= ?
-                ) GROUP BY coin, side
-                ORDER BY cnt DESC, tot DESC""",
+            f"""SELECT ps.coin, ps.side, ps.address, ps.notional_usd
+                FROM position_snapshots ps
+                INNER JOIN (
+                    SELECT address, MAX(snapshot_at) AS latest
+                    FROM position_snapshots
+                    WHERE snapshot_at > datetime('now', '-{int(window_minutes)} minutes')
+                    GROUP BY address
+                ) m ON ps.address = m.address AND ps.snapshot_at = m.latest
+                WHERE ps.notional_usd >= ?""",
             (min_notional,),
         ).fetchall()
-    return [
-        {"coin": r["coin"], "side": r["side"], "count": r["cnt"], "total": float(r["tot"] or 0)}
-        for r in rows
-    ]
+
+    smart_scores = db.get_latest_smart_scores([r["address"] for r in rows])
+    groups: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        g = groups.setdefault(
+            (r["coin"], r["side"]),
+            {"coin": r["coin"], "side": r["side"], "count": 0, "total": 0.0, "smart": 0.0},
+        )
+        g["count"] += 1
+        g["total"] += float(r["notional_usd"] or 0)
+        g["smart"] += smart_scores.get((r["address"] or "").lower(), 0.0)
+
+    out = list(groups.values())
+    for g in out:
+        g["smart"] = round(g["smart"], 1)
+    out.sort(key=lambda g: (g["count"], g["smart"]), reverse=True)
+    return out
 
 
 def find_confluence(setups: list[dict]) -> list[dict]:
@@ -54,6 +70,9 @@ def find_confluence(setups: list[dict]) -> list[dict]:
             continue
         out.append({
             "coin": coin, "side": side, "score": score,
-            "whales": w["count"], "total_notional": w["total"], "setup": s,
+            "whales": w["count"], "total_notional": w["total"],
+            "smart": w.get("smart", 0.0), "setup": s,
         })
+    # Rank confluence matches by combined smart_score (skill), not notional.
+    out.sort(key=lambda m: m["smart"], reverse=True)
     return out

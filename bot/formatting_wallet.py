@@ -184,19 +184,30 @@ def wallet_performance_alert(rank, address: str, state: str, account_value: floa
 
 def confluence_alert(coin: str, side: str, whale_count: int,
                      total_notional: float, whales: list[dict],
-                     premium: bool = False) -> str:
-    """Full confluence alert — sent to Pro channel."""
+                     premium: bool = False,
+                     combined_smart_score: float | None = None) -> str:
+    """Full confluence alert — sent to Pro channel.
+
+    Ranked by combined smart_score (skill), shown alongside combined notional.
+    """
     side_emoji = "🟢" if side == "long" else "🔴"
     direction = "LONG" if side == "long" else "SHORT"
     premium_tag = " | 🔒 <b>PREMIUM</b>" if premium else ""
     whale_lines = "\n".join(
-        f"  🏆 #{w['rank']} — ${w['notional']:,.0f} | <code>{w['address'][:6]}...{w['address'][-4:]}</code>"
-        for w in sorted(whales, key=lambda x: x["rank"])
+        f"  🏆 #{w['rank']} — ${w['notional']:,.0f}"
+        f" | 🧠 {w.get('smart', 0.0):+.1f}"
+        f" | <code>{w['address'][:6]}...{w['address'][-4:]}</code>"
+        for w in sorted(whales, key=lambda x: x.get("smart", 0.0), reverse=True)
+    )
+    smart_line = (
+        f"🧠 Combined smart score: <b>{combined_smart_score:+.1f}</b>\n"
+        if combined_smart_score is not None else ""
     )
     return (
         f"🐋🐋 <b>WHALE CONFLUENCE — {coin}-PERP</b>{premium_tag}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"{side_emoji} <b>{direction}</b> | {whale_count} top-50 wallets aligned\n"
+        f"{smart_line}"
         f"💰 Combined: <b>${total_notional:,.0f}</b>\n\n"
         f"<b>Wallets:</b>\n{whale_lines}\n"
         f"━━━━━━━━━━━━━━━━\n"
