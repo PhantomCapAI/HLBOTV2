@@ -1,86 +1,93 @@
-# HL Intel — unified personal Hyperliquid intelligence bot
+# MOONBOYHL
 
-One Telegram bot, one process, on Zeabur. Combines:
+**A Telegram bot for live Hyperliquid intel — whale tracking, multi-timeframe technical setups, and wallet health scores, delivered straight to your DM.**
 
-- **Coin technical scanner** (your Grok bot): universe screen → multi-timeframe
-  confluence score → deep dive → Grok setups (entry/stop/targets), via `/scan`,
-  `/coin`, and proactive high-score alerts.
-- **Wallet tracker** (the GitHub engine): whale position opens/adds, whale
-  confluence, liquidation-risk, funding/OI surges, wallet PnL health.
-- **Correlation** (the payoff): when a strong technical setup lines up with
-  multiple tracked whales on the same side → a prioritized `STRONG CONFLUENCE`
-  alert.
+MOONBOYHL watches the Hyperliquid perps universe and a curated set of tracked wallets, then surfaces the moments worth knowing about: high-confluence technical setups (entry / stop / targets), whale position opens, adds, trims, and exits, funding/OI surges, liquidation risk, and — the payoff — when a strong technical setup lines up with multiple whales on the same side.
 
-Everything goes to **your DM**. Access is **pay-to-use** (see below). No channels.
+## Try it
 
-## Access — pay-to-use ($3 USDC, Solana)
+👉 **[t.me/MOONBOYHL_bot](https://t.me/MOONBOYHL_bot)**
 
-The value commands and proactive alerts are gated behind an on-chain payment:
-
-- **$3.00 USDC on Solana** opens access for up to **3 days** (~$1/day). Pay to
-  our receiving address, then run `/paid <tx_signature>`.
-- `/paid` verifies the payment **on-chain** (re-implemented in-bot, independent
-  of any gateway): correct USDC mint, amount, recipient, success, and freshness.
-  It **fails closed** — if anything is uncertain, it does not grant access.
-- **Replay-protected:** each transaction signature can be redeemed only once.
-- **One free `/scan`** per chat — a single taste before the gate applies.
-- After the window expires the value commands re-gate; `/start` again to repay.
-- The receiving address is configured **only via the environment**
-  (`PAYMENT_RECEIVING_ADDRESS`); it is never committed to this repo.
-
-Gated (need an active paid window): `/scan` (first one free), `/coin`,
-`/wallets`, `/confluence`, `/dexs`, `/scores`.
-Always free: `/start`, `/paid`, `/stop`, `/alerts`, `/status`, `/help`.
+Open the bot and send `/scan`. **Your first scan is free — no signup, no wallet connect, nothing to install.** After that, the value commands ask for a small pass (see [Access & pricing](#access--pricing)).
 
 ## Commands
 
-- `/start` — how to pay / refill (every `/start` routes through payment)
-- `/paid <tx>` — redeem a Solana USDC payment to activate (up to 3 days)
-- `/stop` — turn off (fully idle, no API calls)
-- `/alerts` — pause/resume just the proactive pushes
-- `/scan` — manual coin scan (first one free, then paid)
-- `/coin SYMBOL` — deep dive one coin (paid)
-- `/wallets` — current tracked-wallet positioning (paid)
-- `/confluence` — latest wallet × setup confluence (paid)
-- `/status` — show state
+| Command | What it does | Needs a pass? |
+| --- | --- | --- |
+| `/scan` | Scan the Hyperliquid universe for multi-timeframe setups (entry / stop / targets) | First one free, then yes |
+| `/coin SYMBOL` | Deep dive on one coin, e.g. `/coin HYPE` | Yes |
+| `/wallets` | Current tracked-wallet positioning (who's long/short what, and how big) | Yes |
+| `/confluence` | Latest wallet × technical-setup confluence | Yes |
+| `/dexs` | List builder-deployed (HIP-3) perp dexs and their markets (equities / metals / FX) | Yes |
+| `/scores` | Tracked wallets ranked by current health score | Yes |
+| `/status` | Show your current state (active pass, alerts, scan cadence) | Free |
+| `/alerts` | Toggle the proactive push alerts on/off | Free |
+| `/start` | How to pay / refill your pass | Free |
+| `/paid <tx>` | Redeem a Solana USDC payment to activate | Free |
+| `/stop` | Turn the scanner off | Free |
+| `/help` | Show the command list | Free |
 
-After `/paid` succeeds, the wallet baseline seeds for one cycle (silent), then
-change-alerts go live for the paid window.
+When you have an active pass, MOONBOYHL also **pushes** high-confluence setups and notable whale activity to you automatically (toggle with `/alerts`).
 
-## Architecture
+## Access & pricing
 
-```
-app.py                      one PTB Application: handlers + JobQueue + run_polling
-config/        env-driven settings (no hardcoded secrets)
-core/          logging, async weight-budget rate limiter
-integrations/  hyperliquid (async, backoff + weight limiter), grok (async)
-storage/       SQLite: snapshots, dedup ledger, subscribers, retention
-scanner/       indicators (pure), screener (async), setups pipeline
-trackers/      wallet_tracker (whale/confluence/liq/funding/OI detection)
-services/      correlation, alerts (dedup choke point), cycles (jobs), digest
-bot/           telegram (single-destination send), handlers, formatting, charts
-```
+The value commands and proactive alerts are gated behind a one-time on-chain payment:
 
-## Run locally
+- **$3 USDC on Solana = up to 3 days** of access (about $1/day).
+- Send the payment to the bot's receiving address (shown in-bot via `/start`), then run **`/paid <tx_signature>`**.
+- The bot verifies the payment **directly on-chain** — it confirms the transaction succeeded, is recent, paid the correct USDC mint to the correct address, and met the required amount. It **fails closed**: if anything is uncertain, access is *not* granted.
+- **Replay-protected** — each transaction signature can be redeemed only once.
+- Your **first `/scan` is free**, once per chat, before the gate applies.
+- When your window expires, the value commands re-gate; pay again to refill.
+
+The bot only ever *reads* the payment transaction to verify it. It never has custody of, or access to, your funds.
+
+## Self-host
+
+MOONBOYHL is a single long-running Python process (Telegram long-polling, SQLite for state). Run it with Docker or directly with Python.
 
 ```sh
-cp .env.example .env        # fill TELEGRAM_BOT_TOKEN and PAYMENT_RECEIVING_ADDRESS
-pip install -r requirements.txt          # (GROK_API_KEY optional)
+cp .env.example .env     # fill in your values
+pip install -r requirements.txt
 python app.py
 ```
 
-The app refuses to start unless both `TELEGRAM_BOT_TOKEN` and
-`PAYMENT_RECEIVING_ADDRESS` are set (no paywall without a payout address).
+Or build the container:
 
-## Deploy on Zeabur
+```sh
+docker build -t moonboyhl .
+docker run --env-file .env -v "$PWD/data:/data" moonboyhl
+```
 
-1. Push this folder to a repo (or point Zeabur at it).
-2. Create a service from the Dockerfile.
-3. Add a **persistent volume mounted at `/data`** (keeps SQLite across deploys).
-4. Set env vars from `.env.example` (at minimum `TELEGRAM_BOT_TOKEN`,
-   `PAYMENT_RECEIVING_ADDRESS`, and `HL_INTEL_DB_PATH=/data/hl_intel.db`).
-5. Deploy. DM your bot `/start`.
+The app refuses to start unless both `TELEGRAM_BOT_TOKEN` and `PAYMENT_RECEIVING_ADDRESS` are set (no paywall without a payout address).
 
-Notes: it's a long-running polling worker (no inbound HTTP), so Zeabur health =
-process liveness; it restarts on crash and resumes from SQLite. Charts are off by
-default (`ENABLE_CHARTS=false`); enabling them needs ~1GB RAM (matplotlib/Pillow).
+### Environment variables
+
+Set these in your environment or `.env` — **use your own values; the examples below are placeholders.**
+
+| Variable | Required | Example / placeholder | Notes |
+| --- | --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | ✅ | `123456789:your-telegram-bot-token` | From [@BotFather](https://t.me/BotFather) |
+| `PAYMENT_RECEIVING_ADDRESS` | ✅ | `YourSolanaUsdcAddressHere` | Your Solana address that receives USDC |
+| `SOLANA_RPC_URL` | – | `https://api.mainnet-beta.solana.com` | Any Solana mainnet RPC endpoint |
+| `OWNER_CHAT_ID` | – | `0` | Your Telegram chat id to bypass the paywall (`0` = disabled) |
+| `PAYMENT_PRICE_USD` | – | `3.00` | Price per pass, in USDC |
+| `PAYMENT_VALIDITY_DAYS` | – | `3` | How long a pass lasts |
+| `GROK_API_KEY` | – | `your-xai-api-key` | Optional; setups fall back to a local generator if unset |
+| `HL_INTEL_DB_PATH` | – | `/data/hl_intel.db` | Point at a persistent volume to keep state across restarts |
+| `WALLET_SCAN_INTERVAL_SECONDS` | – | `180` | How often tracked wallets are polled |
+| `COIN_SCAN_INTERVAL_SECONDS` | – | `300` | How often the coin scanner runs |
+| `ENABLE_CHARTS` | – | `false` | Chart images are off by default; enabling needs ~1GB RAM |
+
+See [`.env.example`](.env.example) for the full set of tunable thresholds (whale size, funding/OI surge, liquidation proximity, correlation cooldowns, etc.).
+
+State (subscribers, payment ledger, snapshots) lives in SQLite at `HL_INTEL_DB_PATH`. Mount it on a persistent volume so passes and the replay-protection ledger survive restarts.
+
+## What this is — and isn't
+
+- ✅ It **surfaces signals**: technical setups, whale positioning, confluence, and wallet health, so you can look faster.
+- ✅ It **only reads** public on-chain and market data, plus the one payment transaction it verifies to activate your pass.
+- ❌ It is **not financial advice.** Scores and setups are informational; do your own research.
+- ❌ It **does not place trades**, manage positions, or touch your trading funds or keys. It never asks for them.
+
+Markets are risky and signals are not guarantees. Trade at your own risk.
