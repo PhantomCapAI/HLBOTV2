@@ -9,6 +9,7 @@ from storage.database import (
     get_latest_position_snapshot_at,
     get_recent_positions_for_addresses,
     get_latest_wallet_performance,
+    get_latest_smart_scores,
     save_positions,
     save_wallet_performance_snapshot,
     alert_already_sent,
@@ -54,6 +55,78 @@ WHALE_REACTIVATION_LOOKBACK_HOURS = 12
 WHALE_REACTIVATION_COOLDOWN_MINUTES = 1440
 REACTIVATION_NOTE_MARKERS = ("flat", "watch", "sidelined", "empty", "inactive")
 WALLET_PERFORMANCE_COOLDOWN_MINUTES = 360
+
+# --- smart_score: rank tracked wallets by skill, not by account size ---
+# Trailing week+month ROI (in %) is the backbone; we then dock points for
+# carrying high leverage and for adding to a position while the day is red
+# (averaging down under stress). Higher = better-skilled, lower-risk.
+SMART_SCORE_LEVERAGE_FREE_X = 3.0          # book leverage up to this is unpenalized
+SMART_SCORE_LEVERAGE_PENALTY_PER_X = 2.0   # points docked per 1x of leverage above the free band
+SMART_SCORE_STRESS_ADD_PENALTY = 15.0      # points docked for adding while day PnL is negative
+
+
+def window_roi(row: dict) -> tuple[float, float]:
+    """(week_roi, month_roi) as decimal fractions from a leaderboard row.
+
+    HL leaderboard rows carry windowPerformances as [name, {pnl, roi, vlm}]
+    pairs (roi is a *string* fraction, e.g. "-0.0149"). Manual watch rows carry
+    a plain dict without roi. Anything missing/unparseable → 0.0 (neutral).
+    """
+    perfs = dict(row.get("windowPerformances", {}) or {})
+
+    def _roi(name: str) -> float:
+        try:
+            return float((perfs.get(name) or {}).get("roi", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return _roi("week"), _roi("month")
+
+
+def has_positive_week_roi(row: dict) -> bool:
+    """True unless the wallet's trailing-week ROI is known to be negative.
+
+    Missing/unparseable week ROI (e.g. curated watch rows) counts as neutral
+    and is kept — the filter only drops wallets we *know* are losing.
+    """
+    week_roi, _ = window_roi(row)
+    return week_roi >= 0
+
+
+def filter_by_performance(leaderboard: list[dict]) -> list[dict]:
+    """Drop wallets with negative trailing-week ROI from the tracked/alerting set."""
+    kept = [row for row in leaderboard if has_positive_week_roi(row)]
+    dropped = len(leaderboard) - len(kept)
+    if dropped:
+        log.info("Performance filter dropped %s/%s wallets (negative week ROI).",
+                 dropped, len(leaderboard))
+    return kept
+
+
+def wallet_added_under_stress(positions: list[dict], prev_by_key: dict, day_pnl: float) -> bool:
+    """True if the wallet grew an existing position meaningfully while the day is red."""
+    if day_pnl >= 0:
+        return False
+    for pos in positions:
+        prev = prev_by_key.get(f"{pos['coin']}:{pos['side']}")
+        if not prev:
+            continue
+        prev_notional = prev["notional_usd"]
+        if prev_notional <= 0:
+            continue
+        pct_increase = ((pos["notional_usd"] - prev_notional) / prev_notional) * 100
+        if pct_increase >= SIZE_INCREASE_THRESHOLD_PCT:
+            return True
+    return False
+
+
+def compute_smart_score(week_roi: float, month_roi: float,
+                        book_leverage: float, added_under_stress: bool) -> float:
+    """Skill-weighted score: trailing ROI minus leverage and stress-add penalties."""
+    roi_points = (week_roi + month_roi) * 100.0
+    lev_penalty = max(0.0, book_leverage - SMART_SCORE_LEVERAGE_FREE_X) * SMART_SCORE_LEVERAGE_PENALTY_PER_X
+    stress_penalty = SMART_SCORE_STRESS_ADD_PENALTY if added_under_stress else 0.0
+    return round(roi_points - lev_penalty - stress_penalty, 1)
 
 
 def parse_alert_notional(alert_key: str) -> float | None:
@@ -233,12 +306,19 @@ async def check_wallet_performance_health(
     positions: list[dict],
     account_value: float,
     seed_mode: bool,
+    added_under_stress: bool = False,
 ) -> None:
     current = wallet_performance_snapshot(account_value, positions)
     previous = get_latest_wallet_performance(address)
     state, reason = classify_wallet_performance(current, previous)
     score = wallet_health_score(current, state)
-    save_wallet_performance_snapshot(address=address, state=state, health_score=score, **current)
+    week_roi, month_roi = window_roi(row)
+    smart = compute_smart_score(
+        week_roi, month_roi, current["book_leverage"], added_under_stress
+    )
+    save_wallet_performance_snapshot(
+        address=address, state=state, health_score=score, smart_score=smart, **current
+    )
 
     if seed_mode or previous is None:
         return
@@ -360,6 +440,7 @@ async def check_whale_positions(
 
             prev_rows = get_previous_positions(address)
             prev_by_key = {f"{r['coin']}:{r['side']}": r for r in prev_rows}
+            stress_add = wallet_added_under_stress(current_positions, prev_by_key, day_pnl)
 
             save_positions(address, current_positions)
             await check_wallet_performance_health(
@@ -369,6 +450,7 @@ async def check_whale_positions(
                 positions=current_positions,
                 account_value=account_value,
                 seed_mode=seed_mode,
+                added_under_stress=stress_add,
             )
 
             if seed_mode:
@@ -551,6 +633,7 @@ async def check_whale_confluence(leaderboard: list[dict], assets: list[dict], se
         if not is_algo(row["ethAddress"])
     }
     rows = get_recent_positions_for_addresses(list(top50.keys()))
+    smart_scores = get_latest_smart_scores(list(top50.keys()))
 
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -560,14 +643,20 @@ async def check_whale_confluence(leaderboard: list[dict], assets: list[dict], se
             "rank": top50[row["address"]],
             "notional": row["notional_usd"],
             "entry_px": row["entry_px"],
+            "smart": smart_scores.get((row["address"] or "").lower(), 0.0),
         })
 
-    for key, whales in groups.items():
-        if len(whales) < 2:
-            continue
+    # Rank confluence groups by combined smart_score (skill), not combined notional.
+    ranked_groups = sorted(
+        ((key, whales) for key, whales in groups.items() if len(whales) >= 2),
+        key=lambda kw: sum(w["smart"] for w in kw[1]),
+        reverse=True,
+    )
 
+    for key, whales in ranked_groups:
         coin, side = key.split(":", 1)
         total_notional = sum(w["notional"] for w in whales)
+        combined_smart = round(sum(w["smart"] for w in whales), 1)
         whale_count = len(whales)
         alert_key = f"confluence:{coin}:{side}:{whale_count}"
 
@@ -586,7 +675,7 @@ async def check_whale_confluence(leaderboard: list[dict], assets: list[dict], se
         caption = confluence_alert(
             coin=coin, side=side, whale_count=whale_count,
             total_notional=total_notional, whales=whales,
-            premium=whale_count >= 3,
+            premium=whale_count >= 3, combined_smart_score=combined_smart,
         )
         chart = await generate_confluence_chart(
             coin=coin, side=side, whales=whales,
