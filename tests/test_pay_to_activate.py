@@ -312,6 +312,26 @@ def test_expired_paid_regates(tmp_db):
     assert ran["v"] is False
 
 
+def test_owner_bypass(tmp_db, monkeypatch):
+    monkeypatch.setattr(config, "OWNER_CHAT_ID", 777)
+    # Owner is always paid without any payment...
+    assert ent.is_paid(777) is True
+    assert db.get_paid_until(777) is None
+    # ...and a free-taste handler never burns the owner's freebie.
+    handler, ran = _make_gated(free_taste=True)
+    asyncio.run(handler(FakeUpdate(777), FakeContext()))
+    assert ran["v"] is True
+    assert db.get_free_used(777) is False
+    # A non-owner unpaid chat is still gated.
+    assert ent.is_paid(778) is False
+
+
+def test_owner_bypass_disabled_when_zero(tmp_db, monkeypatch):
+    monkeypatch.setattr(config, "OWNER_CHAT_ID", 0)
+    assert ent.is_paid(0) is False        # default 0 must not grant access
+    assert ent.is_paid(123) is False
+
+
 def test_correct_handlers_gated(tmp_db):
     import bot.handlers as h
     gated = ["scan", "coin_cmd", "wallets_cmd", "confluence_cmd", "dexs_cmd", "scores_cmd"]

@@ -21,7 +21,13 @@ log = logging.getLogger(__name__)
 
 
 def is_paid(chat_id: int) -> bool:
-    """True iff the chat has a paid_until in the future."""
+    """True iff the chat has a paid_until in the future.
+
+    The operator (OWNER_CHAT_ID) is always treated as paid and never burns the
+    free taste. Disabled when OWNER_CHAT_ID is 0 (the default).
+    """
+    if config.OWNER_CHAT_ID and chat_id == config.OWNER_CHAT_ID:
+        return True
     raw = db.get_paid_until(chat_id)
     if not raw:
         return False

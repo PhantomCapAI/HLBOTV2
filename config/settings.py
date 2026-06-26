@@ -96,6 +96,9 @@ SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.co
 PAYMENT_RECEIVING_ADDRESS = os.getenv("PAYMENT_RECEIVING_ADDRESS", "")
 PAYMENT_PRICE_USD = _f("PAYMENT_PRICE_USD", 3.00)
 PAYMENT_VALIDITY_DAYS = _i("PAYMENT_VALIDITY_DAYS", 3)
+# Operator's Telegram chat id — bypasses the paywall (never pays, never burns
+# the free taste). 0 disables the bypass.
+OWNER_CHAT_ID = _i("OWNER_CHAT_ID", 0)
 
 # ---- Correlation (wallet x technical confluence) ----
 CORRELATION_MIN_SCORE = _f("CORRELATION_MIN_SCORE", 60.0)
