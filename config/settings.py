@@ -100,6 +100,20 @@ PAYMENT_VALIDITY_DAYS = _i("PAYMENT_VALIDITY_DAYS", 3)
 # the free taste). 0 disables the bypass.
 OWNER_CHAT_ID = _i("OWNER_CHAT_ID", 0)
 
+# ---- Wallet identity & profile layer ----
+# Skill tier cutoffs on smart_score (trailing week+month ROI minus risk penalties):
+#   Sharp   >= WALLET_TIER_SHARP
+#   Solid   >= WALLET_TIER_SOLID   (and < SHARP)
+#   Average >= WALLET_TIER_AVERAGE (and < SOLID)
+#   Sloppy   < WALLET_TIER_AVERAGE
+WALLET_TIER_SHARP = _f("WALLET_TIER_SHARP", 25.0)
+WALLET_TIER_SOLID = _f("WALLET_TIER_SOLID", 10.0)
+WALLET_TIER_AVERAGE = _f("WALLET_TIER_AVERAGE", 0.0)
+# Current-state classifier: hot = day&week ROI above +eps; cold = both below -eps.
+WALLET_STATE_ROI_EPS = _f("WALLET_STATE_ROI_EPS", 0.0)
+# Trailing window (minutes) for the flailing signal (flips + stress-adds / hour).
+WALLET_FLAIL_WINDOW_MIN = _i("WALLET_FLAIL_WINDOW_MIN", 60)
+
 # ---- Whale exit / flip / trim detection (the other half of WHALE ADDING) ----
 # A tracked position that shrinks past CLOSE_PCT (of size) — or vanishes — fires
 # WHALE CLOSED; a side reversal fires WHALE FLIPPED. Trims (partial reductions in

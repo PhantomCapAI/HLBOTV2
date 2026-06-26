@@ -2,6 +2,26 @@ from datetime import datetime
 
 from utils.fmt import fmt, fmt_price
 
+_DIVIDER = "━━━━━━━━━━━━━━━━\n"
+
+
+def with_identity(caption: str, codename: str, profile: str = "") -> str:
+    """Inject the wallet's persistent identity + profile context under an alert's
+    title, so the codename is the headline and leaderboard rank is just context.
+
+    Kept scannable (codename + one profile line); the full dossier is /wallet.
+    """
+    if not codename:
+        return caption
+    block = f"🪪 <b>{codename}</b>\n"
+    if profile:
+        block += f"📋 {profile}\n"
+    idx = caption.find(_DIVIDER)
+    if idx == -1:
+        return block + caption
+    pos = idx + len(_DIVIDER)
+    return caption[:pos] + block + caption[pos:]
+
 
 def _rank_line(rank) -> str:
     if isinstance(rank, int):
@@ -299,9 +319,8 @@ def confluence_alert(coin: str, side: str, whale_count: int,
     direction = "LONG" if side == "long" else "SHORT"
     premium_tag = " | 🔒 <b>PREMIUM</b>" if premium else ""
     whale_lines = "\n".join(
-        f"  🏆 #{w['rank']} — ${w['notional']:,.0f}"
-        f" | 🧠 {w.get('smart', 0.0):+.1f}"
-        f" | <code>{w['address'][:6]}...{w['address'][-4:]}</code>"
+        f"  🪪 {w.get('codename') or (w['address'][:6] + '...' + w['address'][-4:])}"
+        f" — ${w['notional']:,.0f} | 🧠 {w.get('smart', 0.0):+.1f} | #{w['rank']}"
         for w in sorted(whales, key=lambda x: x.get("smart", 0.0), reverse=True)
     )
     smart_line = (
