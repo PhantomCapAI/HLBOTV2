@@ -203,6 +203,44 @@ async def run_scan() -> list[dict]:
     return discoveries[:SHORTLIST_SIZE]
 
 
+async def scan_specific(coins: list[str]) -> list[dict]:
+    """Score specific crypto perp coins by symbol — the correlation pass.
+
+    Always scans the CORE crypto perp universe (ignores ENABLE_BUILDER_DEXS) and
+    bypasses the liquidity shortlist, so the STRONG-CONFLUENCE join overlaps the
+    markets whales actually trade (BTC/ETH/HYPE/SOL…) even when the normal
+    shortlist is dominated by builder-dex equities. Coins are matched on the bare
+    symbol the whale tracker uses (no 'dex:' prefix).
+    """
+    if not coins:
+        return []
+    want = {c.upper() for c in coins}
+    meta, ctxs = await hl.get_meta_and_ctxs()  # crypto only — guarantees overlap
+    out = []
+    for i, asset in enumerate(meta):
+        name = asset["name"]
+        if name.upper() not in want:
+            continue
+        ctx = ctxs[i]
+        try:
+            frames = await _fetch_screen(name, SCAN_TFS)
+            reads = {tf: analyse_tf(tf, frames[tf]) for tf in SCAN_TFS}
+        except Exception as e:
+            log.warning("  correlation scan skip %s: %s: %s", name, type(e).__name__, e)
+            continue
+        out.append({
+            "coin": name,
+            "score": calculate_confluence_score(reads, float(ctx.get("funding") or 0)),
+            "regime_4h": reads["4h"].regime,
+            "lean_4h": reads["4h"].lean,
+            "adx_4h": round(reads["4h"].adx, 1),
+            "direction": "long" if reads["4h"].lean > 0 else "short" if reads["4h"].lean < 0 else "none",
+            "funding": float(ctx.get("funding") or 0),
+            "oi_usd": float(ctx.get("openInterest") or 0) * float(ctx.get("markPx") or 0),
+        })
+    return out
+
+
 async def _fetch_live(coin: str, ctx: dict) -> tuple[dict, dict]:
     frames = {tf: await hl.candles_df(coin, tf) for tf in config.CONFIG.timeframes}
     book = await hl.get_l2_book(coin)
