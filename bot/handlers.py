@@ -6,16 +6,47 @@ proactive pushes. /scan and /coin are pull (work whenever). State is persisted
 in SQLite so the toggle survives restarts.
 """
 import logging
+from datetime import datetime, timedelta, timezone
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 import config
 from storage import database as db
+from core.entitlements import require_paid, is_paid, paywall_message
+from core.solana_pay import verify_usdc_payment
 from scanner.setups import coin_scan, deep_dive_symbol
 from bot.formatting import format_setup
 
 log = logging.getLogger(__name__)
+
+# Friendly explanations for verify_usdc_payment failure reasons.
+_PAID_REASONS = {
+    "receiving_address_not_configured": "Payment isn't configured yet — contact the operator.",
+    "malformed_signature": "That doesn't look like a Solana transaction signature.",
+    "rpc_error": "Couldn't reach Solana to verify right now — try again in a moment.",
+    "tx_not_found": "I couldn't find that transaction on Solana (yet). Wait for it to confirm, then retry.",
+    "tx_failed": "That transaction failed on-chain.",
+    "no_block_time": "That transaction isn't confirmed yet — wait a few seconds and retry.",
+    "tx_too_old": "That payment is too old to redeem.",
+    "bad_block_time": "That transaction's timestamp looks off — please retry.",
+    "no_usdc_to_recipient": "I don't see a USDC payment to our address in that transaction.",
+    "unexpected_token_decimals": "That token doesn't look like USDC.",
+    "amount_too_low": f"That payment is below the required ${config.PAYMENT_PRICE_USD:.2f} USDC.",
+}
+
+
+def _fmt_until(raw: str | None) -> str:
+    """Render a stored paid_until ISO timestamp as 'YYYY-MM-DD HH:MM UTC'."""
+    if not raw:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError):
+        return raw
 
 BANNER = (
     "🟢 <b>HL Intel Scanner ONLINE</b> — on its tippy toes.\n\n"
@@ -32,14 +63,67 @@ BANNER = (
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome + how-to-pay. /start never activates for free — every /start
+    routes through payment. Paying ($3 USDC) opens access for up to 3 days
+    ($1/day); after that the user repays. Background alerts + value commands
+    are driven by the paid window."""
     chat_id = update.effective_chat.id
+    header = (
+        "👋 <b>HL Intel — pay to use.</b>\n\n"
+        f"<b>${config.PAYMENT_PRICE_USD:.2f} USDC</b> on Solana opens the scanner "
+        f"(value commands + proactive alerts) for up to "
+        f"<b>{config.PAYMENT_VALIDITY_DAYS} days</b> — about $1/day.\n\n"
+    )
+    if is_paid(chat_id):
+        raw = db.get_paid_until(chat_id)
+        header = (
+            "✅ <b>You're active.</b>\n"
+            f"Access runs until <b>{_fmt_until(raw)}</b>. "
+            "Paying again refills your time.\n\n"
+        )
+    await update.message.reply_text(header + paywall_message(), parse_mode="HTML")
+
+
+async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Redeem a Solana USDC payment: /paid <tx_signature>."""
+    chat_id = update.effective_chat.id
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: <code>/paid &lt;tx_signature&gt;</code>\n"
+            f"Pay ${config.PAYMENT_PRICE_USD:.2f} USDC (Solana) first, then send "
+            "the transaction signature here.",
+            parse_mode="HTML",
+        )
+        return
+
+    tx = context.args[0].strip()
+    if db.is_payment_used(tx):
+        await update.message.reply_text(
+            "⚠️ That transaction has already been redeemed.")
+        return
+
+    await update.message.reply_text("⏳ Verifying your payment on Solana...")
+    result = await verify_usdc_payment(tx)
+    if not result.get("ok"):
+        reason = _PAID_REASONS.get(result.get("reason"), "Payment could not be verified.")
+        await update.message.reply_text(f"❌ {reason}")
+        return
+
+    # Success: burn the tx (replay protection), grant entitlement, activate.
+    db.mark_payment_used(tx, chat_id)
+    paid_until = datetime.now(timezone.utc) + timedelta(days=config.PAYMENT_VALIDITY_DAYS)
+    db.set_paid_until(chat_id, paid_until.isoformat())
     db.activate_chat(chat_id)
-    db.set_state("wallet_seeded", "0")  # force a fresh baseline on (re)activation
-    # Kick a one-off wallet seed shortly after start (no alerts, just baseline).
+    db.set_state("wallet_seeded", "0")  # fresh baseline on activation
     from services import cycles
     if context.job_queue:
         context.job_queue.run_once(cycles.wallet_seed_job, when=2)
-    await update.message.reply_text(BANNER, parse_mode="HTML")
+    await update.message.reply_text(
+        "✅ <b>Payment verified — you're in.</b>\n"
+        f"Access active until <b>{paid_until.strftime('%Y-%m-%d %H:%M UTC')}</b>.\n\n"
+        + BANNER,
+        parse_mode="HTML",
+    )
 
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -57,6 +141,7 @@ async def toggle_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Proactive alerts are now {status}")
 
 
+@require_paid(free_taste=True)
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Scanning Hyperliquid...")
     try:
@@ -72,6 +157,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Scan error: {str(e)[:200]}")
 
 
+@require_paid()
 async def coin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /coin SYMBOL (e.g. /coin HYPE)")
@@ -90,6 +176,7 @@ async def coin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error analyzing {symbol}: {str(e)[:150]}")
 
 
+@require_paid()
 async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from services import correlation
     rows = correlation.current_wallet_confluence()
@@ -104,6 +191,7 @@ async def wallets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+@require_paid()
 async def confluence_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from services import cycles
     snapshot = cycles.last_confluence_snapshot()
@@ -135,6 +223,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(BANNER, parse_mode="HTML")
 
 
+@require_paid()
 async def dexs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List builder-deployed (HIP-3) perp dexs and their symbols (equities/metals/FX)."""
     from integrations import hyperliquid as hl
@@ -158,6 +247,7 @@ async def dexs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
 
 
+@require_paid()
 async def scores_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Rank tracked wallets by current health score (best -> worst)."""
     rows = db.get_latest_scores()

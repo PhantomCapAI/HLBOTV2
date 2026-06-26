@@ -43,6 +43,7 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", h.start))
+    app.add_handler(CommandHandler("paid", h.paid_cmd))
     app.add_handler(CommandHandler("stop", h.stop_cmd))
     app.add_handler(CommandHandler("alerts", h.toggle_alerts))
     app.add_handler(CommandHandler("scan", h.scan))

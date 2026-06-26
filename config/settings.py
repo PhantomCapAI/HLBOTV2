@@ -88,6 +88,18 @@ LIQ_PROXIMITY_THRESHOLD_PCT = _f("LIQ_PROXIMITY_THRESHOLD_PCT", 10.0)
 LIQ_PROXIMITY_DANGER_PCT = _f("LIQ_PROXIMITY_DANGER_PCT", 5.0)
 MIN_NOTIONAL_FOR_LIQ_ALERT = _f("MIN_NOTIONAL_FOR_LIQ_ALERT", 5_000_000)
 
+# ---- Pay-to-activate (Solana USDC) ----
+# Every /start re-charges $3.00 USDC on Solana ($1/day); paying via /paid <tx>
+# opens the chat for up to PAYMENT_VALIDITY_DAYS (3). After that window the value
+# commands re-gate and the user must repay. The receiving address is env-only.
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+PAYMENT_RECEIVING_ADDRESS = os.getenv("PAYMENT_RECEIVING_ADDRESS", "")
+PAYMENT_PRICE_USD = _f("PAYMENT_PRICE_USD", 3.00)
+PAYMENT_VALIDITY_DAYS = _i("PAYMENT_VALIDITY_DAYS", 3)
+# Operator's Telegram chat id — bypasses the paywall (never pays, never burns
+# the free taste). 0 disables the bypass.
+OWNER_CHAT_ID = _i("OWNER_CHAT_ID", 0)
+
 # ---- Correlation (wallet x technical confluence) ----
 CORRELATION_MIN_SCORE = _f("CORRELATION_MIN_SCORE", 60.0)
 CORRELATION_MIN_WHALES = _i("CORRELATION_MIN_WHALES", 2)
@@ -114,4 +126,9 @@ def validate() -> list[str]:
     problems = []
     if not TELEGRAM_BOT_TOKEN:
         problems.append("TELEGRAM_BOT_TOKEN is not set.")
+    if not PAYMENT_RECEIVING_ADDRESS:
+        problems.append(
+            "PAYMENT_RECEIVING_ADDRESS is not set — refusing to run a paywall "
+            "with no payout address."
+        )
     return problems
