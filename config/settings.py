@@ -105,6 +105,35 @@ CORRELATION_MIN_SCORE = _f("CORRELATION_MIN_SCORE", 60.0)
 CORRELATION_MIN_WHALES = _i("CORRELATION_MIN_WHALES", 2)
 CORRELATION_COOLDOWN_MINUTES = _i("CORRELATION_COOLDOWN_MINUTES", 180)
 
+# ---- Automated wallet discovery (skill-ranked promotion) ----
+# A slow background job scores leaderboard wallets by smart_score and suggests
+# genuinely skilled traders not already tracked. Human-gated by default: it only
+# *suggests* (writes candidates + DMs the owner); you approve with /track <addr>.
+DISCOVERY_ENABLED = _b("DISCOVERY_ENABLED", True)
+DISCOVERY_INTERVAL_HOURS = _f("DISCOVERY_INTERVAL_HOURS", 8.0)
+# How deep into the leaderboard to scan (rows are account-value ranked).
+DISCOVERY_SCAN_TOP_N = _i("DISCOVERY_SCAN_TOP_N", 200)
+# Ignore dust accounts — skill on a tiny book isn't a tracking signal.
+DISCOVERY_MIN_ACCOUNT_VALUE = _f("DISCOVERY_MIN_ACCOUNT_VALUE", 100_000)
+# Minimum smart_score for a wallet to be *suggested*.
+DISCOVERY_MIN_SMART_SCORE = _f("DISCOVERY_MIN_SMART_SCORE", 10.0)
+# Exclude lottery-ticket books: cap on book leverage (exposure / equity).
+DISCOVERY_MAX_LEVERAGE = _f("DISCOVERY_MAX_LEVERAGE", 20.0)
+# Market-maker / delta-neutral detection (from current positions):
+#   flag a wallet holding >= MM_MIN_COINS coins whose net exposure is a small
+#   fraction (<= MM_NET_GROSS_RATIO) of gross exposure (balanced both sides).
+DISCOVERY_MM_MIN_COINS = _i("DISCOVERY_MM_MIN_COINS", 6)
+DISCOVERY_MM_NET_GROSS_RATIO = _f("DISCOVERY_MM_NET_GROSS_RATIO", 0.25)
+# Optional silent auto-promotion (off by default). When on, only wallets at/above
+# AUTO_ADD_MIN_SMART are auto-tracked, at most AUTO_ADD_MAX_PER_RUN per run.
+DISCOVERY_AUTO_ADD = _b("DISCOVERY_AUTO_ADD", False)
+DISCOVERY_AUTO_ADD_MIN_SMART = _f("DISCOVERY_AUTO_ADD_MIN_SMART", 25.0)
+DISCOVERY_AUTO_ADD_MAX_PER_RUN = _i("DISCOVERY_AUTO_ADD_MAX_PER_RUN", 3)
+# Auto-retire a *discovered* tracked wallet after this many consecutive discovery
+# runs with negative week AND month ROI. Hand-picked watchlist entries are never
+# auto-retired.
+DISCOVERY_RETIRE_CYCLES = _i("DISCOVERY_RETIRE_CYCLES", 3)
+
 
 @dataclass
 class IndicatorConfig:

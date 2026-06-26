@@ -129,6 +129,52 @@ def compute_smart_score(week_roi: float, month_roi: float,
     return round(roi_points - lev_penalty - stress_penalty, 1)
 
 
+def book_directionality(positions: list[dict]) -> dict:
+    """Summarize a wallet's book direction from its open positions.
+
+    Returns gross/net notional, distinct coin count, both-sided flag, and the
+    net/gross ratio. A delta-neutral / market-maker book carries large gross
+    exposure that nets out to ~0 across many coins (ratio near 0); a directional
+    trader's net is a large fraction of gross (ratio near 1).
+    """
+    gross = sum(abs(float(p["notional_usd"])) for p in positions)
+    net = sum(
+        (float(p["notional_usd"]) if p["side"] == "long" else -float(p["notional_usd"]))
+        for p in positions
+    )
+    coins = {p["coin"] for p in positions}
+    has_long = any(p["side"] == "long" for p in positions)
+    has_short = any(p["side"] == "short" for p in positions)
+    ratio = abs(net) / gross if gross > 0 else 1.0
+    return {
+        "gross": gross,
+        "net": net,
+        "coin_count": len(coins),
+        "both_sided": has_long and has_short,
+        "net_gross_ratio": ratio,
+    }
+
+
+def looks_like_market_maker(positions: list[dict],
+                            min_coins: int, max_net_gross_ratio: float) -> tuple[bool, str]:
+    """Flag likely market-maker / delta-neutral books from current positions.
+
+    Reliable signal: a balanced book (both sides) spread across many coins whose
+    net exposure is a small fraction of gross. We deliberately do NOT try to
+    infer "low PnL volatility relative to book size" — the leaderboard and
+    clearinghouseState expose only cumulative window pnl/roi, not a PnL time
+    series, so that signal can't be computed reliably and is skipped.
+    """
+    d = book_directionality(positions)
+    if (d["both_sided"] and d["coin_count"] >= min_coins
+            and d["net_gross_ratio"] <= max_net_gross_ratio):
+        return True, (
+            f"delta-neutral book: {d['coin_count']} coins both sides, "
+            f"net/gross {d['net_gross_ratio']:.2f}"
+        )
+    return False, ""
+
+
 def parse_alert_notional(alert_key: str) -> float | None:
     try:
         return float(alert_key.rsplit(":", 1)[1])

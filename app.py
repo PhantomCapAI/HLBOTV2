@@ -53,12 +53,22 @@ def main() -> None:
     app.add_handler(CommandHandler("dexs", h.dexs_cmd))
     app.add_handler(CommandHandler("status", h.status_cmd))
     app.add_handler(CommandHandler("scores", h.scores_cmd))
+    app.add_handler(CommandHandler("candidates", h.candidates_cmd))
+    app.add_handler(CommandHandler("track", h.track_cmd))
     app.add_handler(CommandHandler("help", h.help_cmd))
 
     jq = app.job_queue
     jq.run_repeating(cycles.wallet_job, interval=config.WALLET_SCAN_INTERVAL_SECONDS, first=10)
     jq.run_repeating(cycles.coin_job, interval=config.COIN_SCAN_INTERVAL_SECONDS, first=25)
     jq.run_repeating(cycles.prune_job, interval=24 * 3600, first=3600)
+    if config.DISCOVERY_ENABLED:
+        jq.run_repeating(
+            cycles.discovery_job,
+            interval=config.DISCOVERY_INTERVAL_HOURS * 3600,
+            first=120,
+        )
+        log.info("Wallet discovery enabled (every %sh, auto_add=%s).",
+                 config.DISCOVERY_INTERVAL_HOURS, config.DISCOVERY_AUTO_ADD)
 
     log.info("HL Intel running (wallet=%ss, coin=%ss)...",
              config.WALLET_SCAN_INTERVAL_SECONDS, config.COIN_SCAN_INTERVAL_SECONDS)

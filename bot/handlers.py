@@ -247,6 +247,64 @@ async def dexs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n\n".join(lines), parse_mode="HTML")
 
 
+def _owner_ok(chat_id: int) -> bool:
+    """Discovery management is operator-only.
+
+    With OWNER_CHAT_ID set, only that chat qualifies; otherwise (single-operator
+    deployments with the bypass off) any chat holding a live paid window may.
+    """
+    if config.OWNER_CHAT_ID:
+        return chat_id == config.OWNER_CHAT_ID
+    return is_paid(chat_id)
+
+
+async def candidates_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List current discovery suggestions awaiting approval."""
+    if not _owner_ok(update.effective_chat.id):
+        await update.message.reply_text("🔒 Discovery management is operator-only.")
+        return
+    rows = db.get_candidates_by_status("suggested")
+    if not rows:
+        await update.message.reply_text(
+            "No discovery suggestions right now. The discovery job posts new ones as it finds them."
+        )
+        return
+    lines = ["🔎 <b>Discovery suggestions</b> (approve with /track)"]
+    for r in rows[:20]:
+        addr = r["address"]
+        lines.append(
+            f"• <code>{addr[:6]}…{addr[-4:]}</code> — 🧠 <b>{(r['smart_score'] or 0):+.1f}</b>"
+            f" | wk {(r['week_roi'] or 0)*100:+.1f}% mo {(r['month_roi'] or 0)*100:+.1f}%"
+            f" | {(r['leverage'] or 0):.1f}x\n  <code>/track {addr}</code>"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def track_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Promote a discovery candidate into the active tracked set."""
+    if not _owner_ok(update.effective_chat.id):
+        await update.message.reply_text("🔒 Only the operator can promote wallets.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: <code>/track &lt;wallet_address&gt;</code>", parse_mode="HTML")
+        return
+    addr = context.args[0].strip().lower()
+    cand = db.get_candidate(addr)
+    if cand is None:
+        await update.message.reply_text(
+            "That address isn't a discovery candidate. See /candidates for current suggestions."
+        )
+        return
+    if cand["status"] == "tracked":
+        await update.message.reply_text("That wallet is already being tracked.")
+        return
+    db.set_candidate_status(addr, "tracked")
+    await update.message.reply_text(
+        f"✅ Now tracking <code>{addr}</code>. It joins the active set on the next wallet cycle.",
+        parse_mode="HTML",
+    )
+
+
 @require_paid()
 async def scores_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Rank tracked wallets by current health score (best -> worst)."""

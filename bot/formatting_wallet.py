@@ -216,6 +216,33 @@ def confluence_alert(coin: str, side: str, whale_count: int,
     )
 
 
+def discovery_suggestion_alert(address: str, smart_score: float, week_roi: float,
+                               month_roi: float, leverage: float,
+                               account_value: float, reason: str,
+                               auto_added: bool = False) -> str:
+    """Owner-facing 'we found a skilled wallet' suggestion (or auto-add notice)."""
+    head = "✅ <b>DISCOVERY — auto-tracked</b>" if auto_added else "🔎 <b>DISCOVERY — suggested wallet</b>"
+    action = (
+        "Auto-promoted into the tracked set.\n"
+        if auto_added else
+        f"Approve with <code>/track {address}</code> to start tracking.\n"
+    )
+    return (
+        f"{head}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🔑 <code>{address}</code>\n"
+        f"🧠 Smart score: <b>{smart_score:+.1f}</b>\n"
+        f"📈 ROI — week: <b>{week_roi*100:+.2f}%</b> | month: <b>{month_roi*100:+.2f}%</b>\n"
+        f"⚖️ Book leverage: <b>{leverage:.1f}x</b>\n"
+        f"💰 Account: ${account_value:,.0f}\n"
+        f"🧾 Why: <i>{reason}</i>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{action}"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
 def liquidation_risk_alert(rank: int, address: str, coin: str, side: str,
                            notional_usd: float, liq_px: float, curr_px: float,
                            dist_pct: float, danger: bool = False) -> str:

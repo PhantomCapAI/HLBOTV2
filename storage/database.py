@@ -107,6 +107,19 @@ def init_db() -> None:
                 value TEXT,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS candidate_wallets (
+                address TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'suggested',  -- suggested|tracked|rejected|retired
+                smart_score REAL,
+                week_roi REAL,
+                month_roi REAL,
+                leverage REAL,
+                account_value REAL,
+                reason TEXT,
+                negative_streak INTEGER NOT NULL DEFAULT 0,
+                discovered_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
         """)
         try:
             conn.execute("ALTER TABLE position_snapshots ADD COLUMN liq_px REAL NOT NULL DEFAULT 0")
@@ -526,6 +539,95 @@ def get_state(key: str) -> str | None:
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM app_state WHERE key=?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+# --------------------------- wallet discovery (candidate lifecycle) ---------------------------
+def get_candidate(address: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM candidate_wallets WHERE address=?", (address.lower(),)
+        ).fetchone()
+
+
+def upsert_suggested_candidate(address: str, smart_score: float, week_roi: float,
+                               month_roi: float, leverage: float,
+                               account_value: float, reason: str) -> bool:
+    """Insert a new 'suggested' candidate, or refresh metrics on an existing
+    suggested/tracked one. Returns True only when a *new* suggestion is created
+    (so the caller knows whether to alert). Never resurrects rejected/retired."""
+    address = address.lower()
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT status FROM candidate_wallets WHERE address=?", (address,)
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """INSERT INTO candidate_wallets
+                   (address, status, smart_score, week_roi, month_roi, leverage,
+                    account_value, reason, negative_streak, discovered_at, updated_at)
+                   VALUES (?, 'suggested', ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))""",
+                (address, smart_score, week_roi, month_roi, leverage, account_value, reason),
+            )
+            return True
+        # Refresh metrics for ones still in play; leave rejected/retired alone.
+        if existing["status"] in ("suggested", "tracked"):
+            conn.execute(
+                """UPDATE candidate_wallets
+                   SET smart_score=?, week_roi=?, month_roi=?, leverage=?,
+                       account_value=?, reason=?, updated_at=datetime('now')
+                   WHERE address=?""",
+                (smart_score, week_roi, month_roi, leverage, account_value, reason, address),
+            )
+        return False
+
+
+def set_candidate_status(address: str, status: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE candidate_wallets
+               SET status=?, negative_streak=0, updated_at=datetime('now')
+               WHERE address=?""",
+            (status, address.lower()),
+        )
+
+
+def get_candidates_by_status(status: str) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM candidate_wallets WHERE status=?
+               ORDER BY smart_score DESC""",
+            (status,),
+        ).fetchall()
+
+
+def get_tracked_candidate_addresses() -> list[str]:
+    with get_conn() as conn:
+        return [r["address"] for r in conn.execute(
+            "SELECT address FROM candidate_wallets WHERE status='tracked'"
+        ).fetchall()]
+
+
+def bump_candidate_negative_streak(address: str) -> int:
+    """Increment and return the consecutive negative-window streak."""
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE candidate_wallets
+               SET negative_streak = negative_streak + 1, updated_at=datetime('now')
+               WHERE address=?""",
+            (address.lower(),),
+        )
+        row = conn.execute(
+            "SELECT negative_streak FROM candidate_wallets WHERE address=?", (address.lower(),)
+        ).fetchone()
+    return row["negative_streak"] if row else 0
+
+
+def reset_candidate_negative_streak(address: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE candidate_wallets SET negative_streak=0, updated_at=datetime('now') WHERE address=?",
+            (address.lower(),),
+        )
 
 
 # --------------------------- retention (W5) ---------------------------

@@ -81,6 +81,24 @@ async def broadcast(text: str = None, photo: bytes = None, caption: str = None,
     return sent_any
 
 
+async def notify_owner(text: str) -> bool:
+    """Send an operator-only message.
+
+    Prefers OWNER_CHAT_ID when configured; otherwise falls back to the active
+    alert chats (single-operator deployments where the owner bypass is off).
+    """
+    import config
+    owner = config.OWNER_CHAT_ID
+    if owner:
+        try:
+            await send_to_chat(owner, text=text)
+            return True
+        except Exception as e:
+            log.warning("notify_owner to %s failed: %s", owner, e)
+            return False
+    return await broadcast(text=text)
+
+
 # --- compatibility shims (paid_only ignored) ---
 async def send_alert(message: str, paid_only: bool = False) -> None:
     await broadcast(text=message)
