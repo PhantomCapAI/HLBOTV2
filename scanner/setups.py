@@ -5,7 +5,7 @@ Mirrors the behavior of the live bot's /scan and /coin commands.
 import logging
 
 from integrations import grok
-from scanner.screener import run_scan, deep_dive, scan_one
+from scanner.screener import run_scan, deep_dive, scan_one, scan_specific
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +19,21 @@ async def coin_scan(deep_limit: int = 6) -> list[dict]:
     if not good:
         good = discoveries[:5]
     enriched = await deep_dive(good[:deep_limit])
+    return await grok.generate_setups(enriched)
+
+
+async def correlation_scan(coins: list[str]) -> list[dict]:
+    """Build setups for specific whale-traded crypto coins (for STRONG CONFLUENCE).
+
+    Always evaluates the crypto perp universe so the correlation join overlaps
+    the markets whales trade, regardless of the builder-dex toggle.
+    """
+    if not coins:
+        return []
+    discoveries = await scan_specific(coins)
+    if not discoveries:
+        return []
+    enriched = await deep_dive(discoveries)
     return await grok.generate_setups(enriched)
 
 

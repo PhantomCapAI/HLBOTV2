@@ -52,27 +52,46 @@ def current_wallet_confluence(window_minutes: int = 15, min_notional: float | No
     return out
 
 
+def _setup_directions(s: dict) -> set[str]:
+    """All directions a setup expresses — across every inner setup, not just the
+    first — plus any top-level direction. Robust to multiple setups per coin."""
+    directions: set[str] = set()
+    for inner in (s.get("setups") or []):
+        d = str(inner.get("direction") or "").lower()
+        if d in ("long", "short"):
+            directions.add(d)
+    top = str(s.get("direction") or "").lower()
+    if top in ("long", "short"):
+        directions.add(top)
+    return directions
+
+
 def find_confluence(setups: list[dict]) -> list[dict]:
     if not setups:
         return []
     conf = {(c["coin"], c["side"]): c for c in current_wallet_confluence()}
     out = []
+    seen: set[tuple] = set()
     for s in setups:
         coin = s.get("coin")
-        inner = (s.get("setups") or [{}])[0]
-        direction = (inner.get("direction") or s.get("direction") or "long").lower()
-        side = "long" if direction == "long" else "short"
         score = s.get("score", 0)
         if score < config.CORRELATION_MIN_SCORE:
             continue
-        w = conf.get((coin, side))
-        if not w or w["count"] < config.CORRELATION_MIN_WHALES:
-            continue
-        out.append({
-            "coin": coin, "side": side, "score": score,
-            "whales": w["count"], "total_notional": w["total"],
-            "smart": w.get("smart", 0.0), "setup": s,
-        })
+        # A coin can carry multiple setups / directions — check each against
+        # whale positioning, not just setups[0].
+        for side in _setup_directions(s):
+            w = conf.get((coin, side))
+            if not w or w["count"] < config.CORRELATION_MIN_WHALES:
+                continue
+            key = (coin, side)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "coin": coin, "side": side, "score": score,
+                "whales": w["count"], "total_notional": w["total"],
+                "smart": w.get("smart", 0.0), "setup": s,
+            })
     # Rank confluence matches by combined smart_score (skill), not notional.
     out.sort(key=lambda m: m["smart"], reverse=True)
     return out

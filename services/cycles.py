@@ -15,7 +15,7 @@ import config
 from integrations import hyperliquid as hl
 from storage import database as db
 from trackers import wallet_tracker as wt
-from scanner.setups import coin_scan
+from scanner.setups import coin_scan, correlation_scan
 from services import correlation as corr
 from services import alerts as alerts_svc
 from services import digest as digest_svc
@@ -175,7 +175,19 @@ async def _coin_cycle() -> None:
             key = f"coin:{s.get('coin')}:{direction}"
             await alerts_svc.maybe_send("coin", key, format_setup(s), cooldown_minutes=240)
 
-        matches = corr.find_confluence(setups)
+        # Dedicated correlation pass: the normal shortlist is often builder-dex
+        # equities, which never overlap the crypto perps whales trade — so the
+        # (coin, side) join can't fire. Score the coins where whales are actually
+        # clustered (>= CORRELATION_MIN_WHALES aligned) and feed those in too.
+        whale_coins = [
+            g["coin"] for g in corr.current_wallet_confluence()
+            if g["count"] >= config.CORRELATION_MIN_WHALES
+        ]
+        corr_setups = await correlation_scan(whale_coins) if whale_coins else []
+        by_coin = {s.get("coin"): s for s in setups}
+        for s in corr_setups:  # prefer the freshly-scored correlation setup
+            by_coin[s.get("coin")] = s
+        matches = corr.find_confluence(list(by_coin.values()))
         if matches:
             _last_confluence_snapshot = "\n\n".join(_format_confluence(m) for m in matches)
             for m in matches:
