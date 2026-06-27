@@ -93,7 +93,7 @@ def _read(lean, regime="trend up"):
                   regime=regime, lean=lean, notes=[], bars=300)
 
 
-def test_scan_specific_filters_and_uses_crypto(monkeypatch):
+def test_scan_specific_filters_and_uses_crypto(tmp_db, monkeypatch):
     meta = [{"name": "BTC"}, {"name": "ETH"}, {"name": "HYPE"}]
     ctxs = [{"funding": "0", "markPx": "100", "openInterest": "10000", "dayNtlVlm": "1e9"}
             for _ in meta]

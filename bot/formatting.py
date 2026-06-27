@@ -8,6 +8,7 @@ import html
 
 from utils.fmt import fmt
 from utils.sizing import position_size
+from scanner.flow import flow_line
 
 
 def _esc(v) -> str:
@@ -29,6 +30,11 @@ def format_setup(s: dict) -> str:
         badge = "👀"
 
     msg = f"🚀 <b>{coin}</b>  |  Score: {score} {badge}"
+
+    # OI / funding flow context (market context only — see scanner.flow).
+    line = flow_line(s.get("crowding"))
+    if line:
+        msg += f"\n{line}"
 
     for setup in s.get("setups", []):
         direction = setup.get("direction", "long").upper()

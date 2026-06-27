@@ -61,6 +61,14 @@ def init_db() -> None:
                 unrealized_pnl REAL NOT NULL,
                 snapshot_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS oi_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                coin TEXT NOT NULL,
+                oi_usd REAL NOT NULL,
+                funding REAL NOT NULL,
+                mark_px REAL NOT NULL,
+                snapshot_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS funding_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 asset TEXT NOT NULL,
@@ -196,6 +204,8 @@ def init_db() -> None:
                 ON position_snapshots(snapshot_at DESC);
             CREATE INDEX IF NOT EXISTS idx_funding_asset_snapshot
                 ON funding_snapshots(asset, snapshot_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_oi_coin_snapshot
+                ON oi_snapshots(coin, snapshot_at DESC);
             CREATE INDEX IF NOT EXISTS idx_alerts_type_key_sent
                 ON alerts_sent(alert_type, key, sent_at DESC);
             CREATE INDEX IF NOT EXISTS idx_wallet_performance_address_snapshot
@@ -240,6 +250,27 @@ def save_positions(address: str, positions: list[dict]) -> None:
                     pos["unrealized_pnl"],
                 ),
             )
+
+
+def save_oi_snapshot(coin: str, oi_usd: float, funding: float, mark_px: float) -> None:
+    """Append an open-interest snapshot for a coin (mirrors funding_snapshots)."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO oi_snapshots (coin, oi_usd, funding, mark_px, snapshot_at)
+               VALUES (?, ?, ?, ?, datetime('now'))""",
+            (coin, oi_usd, funding, mark_px),
+        )
+
+
+def get_oi_ago(coin: str, minutes: int) -> sqlite3.Row | None:
+    """Most-recent OI snapshot at least `minutes` old (None if no such history)."""
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM oi_snapshots
+               WHERE coin = ? AND snapshot_at <= datetime('now', ?)
+               ORDER BY snapshot_at DESC LIMIT 1""",
+            (coin, f"-{int(minutes)} minutes"),
+        ).fetchone()
 
 
 def save_funding(assets: list[dict]) -> None:
@@ -828,7 +859,8 @@ def prune_old_data(days: int | None = None) -> None:
     with get_conn() as conn:
         for table in (
             "leaderboard_snapshots", "position_snapshots",
-            "funding_snapshots", "wallet_performance_snapshots", "alerts_sent",
+            "funding_snapshots", "oi_snapshots",
+            "wallet_performance_snapshots", "alerts_sent",
         ):
             ts_col = "sent_at" if table == "alerts_sent" else "snapshot_at"
             conn.execute(f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)", (cutoff,))

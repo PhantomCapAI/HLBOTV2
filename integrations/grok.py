@@ -167,5 +167,9 @@ async def generate_setups(discoveries: list[dict]) -> list[dict]:
                     log.warning("Grok fallback for %s: %s", coin, e)
             if setup is None:
                 setup = _fallback_setup(coin, direction, entry, stop, targets, score, d)
+            # Carry the OI/funding crowding context through for display (set by the
+            # screener; Grok responses don't include it).
+            if d.get("crowding") is not None:
+                setup["crowding"] = d["crowding"]
             results.append(setup)
     return results
