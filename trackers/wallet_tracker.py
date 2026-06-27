@@ -38,9 +38,12 @@ from bot.formatting_wallet import (
     liquidation_risk_alert,
     funding_spike_alert,
     oi_surge_alert,
+    with_identity,
 )
 from bot.charts import generate_whale_chart, generate_confluence_chart
 from bot.telegram import send_alert, send_photo_alert
+from services import wallet_profile as wp
+from core import identity
 import config
 
 log = logging.getLogger(__name__)
@@ -562,8 +565,20 @@ async def check_whale_positions(
                 added_under_stress=stress_add,
             )
 
+            # Persistent identity + behavioral profile (consumes the snapshot
+            # just written above). Runs in seed too, to baseline open-lots.
+            wp.update_profile(
+                address=address, row=row,
+                prev_cycle_by_coin=prev_cycle_by_coin, current_by_coin=current_by_coin,
+                diff_events=diff_events, day_pnl=day_pnl,
+                stress_add=stress_add, seed_mode=seed_mode,
+            )
+
             if seed_mode:
                 continue
+
+            codename = identity.codename_for(address)
+            prof_line = wp.profile_line(address)
 
             for pos in current_positions:
                 if alerts_sent_this_cycle >= MAX_WHALE_ALERTS_PER_CYCLE:
@@ -600,6 +615,7 @@ async def check_whale_positions(
                             profile=wallet_profile_text(wallet_info),
                             inactive_for=format_inactive_for(inactive_hours),
                         )
+                        caption = with_identity(caption, codename, prof_line)
                         chart = await generate_whale_chart(
                             coin=pos["coin"], side=pos["side"], rank=rank,
                             notional=pos["notional_usd"], entry_px=pos["entry_px"],
@@ -651,6 +667,7 @@ async def check_whale_positions(
                             account_value=account_value, day_pnl=day_pnl,
                         )
 
+                    caption = with_identity(caption, codename, prof_line)
                     chart = await generate_whale_chart(
                         coin=pos["coin"], side=pos["side"], rank=rank,
                         notional=pos["notional_usd"], entry_px=pos["entry_px"],
@@ -687,6 +704,7 @@ async def check_whale_positions(
                             notional_usd=pos["notional_usd"],
                             account_value=account_value, day_pnl=day_pnl,
                         )
+                        caption = with_identity(caption, codename, prof_line)
                         chart = await generate_whale_chart(
                             coin=pos["coin"], side=pos["side"], rank=rank,
                             notional=pos["notional_usd"], entry_px=pos["entry_px"],
@@ -742,6 +760,7 @@ async def check_whale_positions(
                             account_value=account_value, day_pnl=day_pnl,
                         )
                         alert_log_type = "Whale add"
+                    caption = with_identity(caption, codename, prof_line)
                     chart = await generate_whale_chart(
                         coin=pos["coin"], side=pos["side"], rank=rank,
                         notional=pos["notional_usd"], entry_px=pos["entry_px"],
@@ -786,6 +805,7 @@ async def check_whale_positions(
                         account_value=account_value, day_pnl=day_pnl,
                         entry_px=float(curr["entry_px"]), curr_px=exit_px,
                     )
+                    caption = with_identity(caption, codename, prof_line)
                     if await safe_send(caption, paid_only=True):
                         record_alert("whale_flip", alert_key)
                         alerts_sent_this_cycle += 1
@@ -812,6 +832,7 @@ async def check_whale_positions(
                         remaining_notional=curr_notional,
                         account_value=account_value, day_pnl=day_pnl, curr_px=exit_px,
                     )
+                    caption = with_identity(caption, codename, prof_line)
                     if await safe_send(caption, paid_only=True):
                         record_alert("whale_closed", alert_key)
                         alerts_sent_this_cycle += 1
@@ -832,6 +853,7 @@ async def check_whale_positions(
                         reduction_pct=ev["reduction_pct"], new_notional=curr_notional,
                         prev_notional=prev_notional, account_value=account_value, day_pnl=day_pnl,
                     )
+                    caption = with_identity(caption, codename, prof_line)
                     if await safe_send(caption, paid_only=True):
                         record_alert("whale_trim", alert_key)
                         alerts_sent_this_cycle += 1
@@ -862,6 +884,7 @@ async def check_whale_confluence(leaderboard: list[dict], assets: list[dict], se
         key = f"{row['coin']}:{row['side']}"
         groups[key].append({
             "address": row["address"],
+            "codename": identity.codename_for(row["address"]),
             "rank": top50[row["address"]],
             "notional": row["notional_usd"],
             "entry_px": row["entry_px"],

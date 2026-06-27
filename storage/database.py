@@ -107,6 +107,42 @@ def init_db() -> None:
                 value TEXT,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS wallet_profiles (
+                address TEXT PRIMARY KEY,
+                codename TEXT,
+                -- point in time (refreshed every cycle):
+                smart_score REAL, skill_tier TEXT, state TEXT,
+                account_value REAL, book_leverage REAL,
+                day_roi REAL, week_roi REAL, month_roi REAL,
+                day_pnl REAL, week_pnl REAL, month_pnl REAL,
+                -- accumulated over observed history:
+                cycles_observed INTEGER NOT NULL DEFAULT 0,
+                sum_leverage REAL NOT NULL DEFAULT 0,
+                adds_total INTEGER NOT NULL DEFAULT 0,
+                adds_to_losers INTEGER NOT NULL DEFAULT 0,
+                cuts_total INTEGER NOT NULL DEFAULT 0,
+                cuts_in_loss INTEGER NOT NULL DEFAULT 0,
+                closes_observed INTEGER NOT NULL DEFAULT 0,
+                wins INTEGER NOT NULL DEFAULT 0,
+                losses INTEGER NOT NULL DEFAULT 0,
+                sum_hold_seconds REAL NOT NULL DEFAULT 0,
+                hold_samples INTEGER NOT NULL DEFAULT 0,
+                max_drawdown_usd REAL NOT NULL DEFAULT 0,
+                flips_total INTEGER NOT NULL DEFAULT 0,
+                first_seen TEXT, updated_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS wallet_open_lots (
+                address TEXT NOT NULL, coin TEXT NOT NULL, side TEXT NOT NULL,
+                opened_at TEXT NOT NULL, last_pnl REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (address, coin, side)
+            );
+            CREATE TABLE IF NOT EXISTS wallet_behavior_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL, event_type TEXT NOT NULL,
+                coin TEXT, ts TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_behavior_addr_ts
+                ON wallet_behavior_events(address, ts DESC);
             CREATE TABLE IF NOT EXISTS candidate_wallets (
                 address TEXT PRIMARY KEY,
                 status TEXT NOT NULL DEFAULT 'suggested',  -- suggested|tracked|rejected|retired
@@ -238,7 +274,7 @@ def get_latest_wallet_performance(address: str) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
             """SELECT * FROM wallet_performance_snapshots
-               WHERE address = ? ORDER BY snapshot_at DESC LIMIT 1""",
+               WHERE address = ? ORDER BY snapshot_at DESC, id DESC LIMIT 1""",
             (address.lower(),),
         ).fetchone()
 
@@ -543,6 +579,142 @@ def get_free_used(chat_id: int) -> bool:
     return get_state(f"free_used:{chat_id}") == "1"
 
 
+# --------------------------- wallet profiles (identity + behavior) ---------------------------
+# Counters that bump_profile_counters is allowed to increment (whitelist guards
+# the dynamic SQL).
+_PROFILE_COUNTERS = {
+    "cycles_observed", "sum_leverage", "adds_total", "adds_to_losers",
+    "cuts_total", "cuts_in_loss", "closes_observed", "wins", "losses",
+    "sum_hold_seconds", "hold_samples", "flips_total",
+}
+
+
+def upsert_profile_point_in_time(
+    address: str, codename: str, smart_score: float, skill_tier: str, state: str,
+    account_value: float, book_leverage: float,
+    day_roi: float, week_roi: float, month_roi: float,
+    day_pnl: float, week_pnl: float, month_pnl: float,
+) -> None:
+    """Refresh the per-cycle (point-in-time) profile fields. Counters untouched.
+    Sets first_seen on first insert."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO wallet_profiles
+                 (address, codename, smart_score, skill_tier, state, account_value,
+                  book_leverage, day_roi, week_roi, month_roi, day_pnl, week_pnl,
+                  month_pnl, first_seen, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))
+               ON CONFLICT(address) DO UPDATE SET
+                 codename=excluded.codename, smart_score=excluded.smart_score,
+                 skill_tier=excluded.skill_tier, state=excluded.state,
+                 account_value=excluded.account_value, book_leverage=excluded.book_leverage,
+                 day_roi=excluded.day_roi, week_roi=excluded.week_roi,
+                 month_roi=excluded.month_roi, day_pnl=excluded.day_pnl,
+                 week_pnl=excluded.week_pnl, month_pnl=excluded.month_pnl,
+                 updated_at=datetime('now')""",
+            (address.lower(), codename, smart_score, skill_tier, state, account_value,
+             book_leverage, day_roi, week_roi, month_roi, day_pnl, week_pnl, month_pnl),
+        )
+
+
+def bump_profile_counters(address: str, deltas: dict,
+                          drawdown_candidate: float | None = None) -> None:
+    """Increment accumulated counters; track most-negative open uPnL as drawdown.
+    Requires the profile row to exist (call upsert_profile_point_in_time first)."""
+    sets, params = [], []
+    for col, delta in deltas.items():
+        if col not in _PROFILE_COUNTERS:
+            raise ValueError(f"unknown profile counter: {col}")
+        sets.append(f"{col} = {col} + ?")
+        params.append(delta)
+    if drawdown_candidate is not None:
+        sets.append("max_drawdown_usd = MIN(max_drawdown_usd, ?)")
+        params.append(float(drawdown_candidate))
+    if not sets:
+        return
+    params.append(address.lower())
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE wallet_profiles SET {', '.join(sets)}, updated_at=datetime('now') "
+            f"WHERE address = ?",
+            params,
+        )
+
+
+def get_wallet_profile(address: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM wallet_profiles WHERE address = ?", (address.lower(),)
+        ).fetchone()
+
+
+def get_wallet_profile_by_codename(codename: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM wallet_profiles WHERE LOWER(codename) = ?",
+            (codename.strip().lower(),),
+        ).fetchone()
+
+
+# --- open-lot tracking (for hold duration + close outcome) ---
+def upsert_open_lot(address: str, coin: str, side: str, opened_at: str, last_pnl: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO wallet_open_lots (address, coin, side, opened_at, last_pnl)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(address, coin, side) DO UPDATE SET last_pnl=excluded.last_pnl""",
+            (address.lower(), coin, side, opened_at, last_pnl),
+        )
+
+
+def update_open_lot_pnl(address: str, coin: str, side: str, last_pnl: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE wallet_open_lots SET last_pnl=? WHERE address=? AND coin=? AND side=?",
+            (last_pnl, address.lower(), coin, side),
+        )
+
+
+def get_open_lot(address: str, coin: str, side: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM wallet_open_lots WHERE address=? AND coin=? AND side=?",
+            (address.lower(), coin, side),
+        ).fetchone()
+
+
+def remove_open_lot(address: str, coin: str, side: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM wallet_open_lots WHERE address=? AND coin=? AND side=?",
+            (address.lower(), coin, side),
+        )
+
+
+# --- recent behavior events (for the flailing / chop signal) ---
+def record_behavior_event(address: str, event_type: str, coin: str | None = None) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO wallet_behavior_events (address, event_type, coin, ts) "
+            "VALUES (?,?,?, datetime('now'))",
+            (address.lower(), event_type, coin),
+        )
+
+
+def count_behavior_events(address: str, event_types: list[str], minutes: int) -> int:
+    if not event_types:
+        return 0
+    placeholders = ",".join("?" * len(event_types))
+    with get_conn() as conn:
+        row = conn.execute(
+            f"""SELECT COUNT(*) AS n FROM wallet_behavior_events
+                WHERE address=? AND event_type IN ({placeholders})
+                  AND ts > datetime('now', ?)""",
+            (address.lower(), *event_types, f"-{int(minutes)} minutes"),
+        ).fetchone()
+    return row["n"] if row else 0
+
+
 # --------------------------- app_state kv ---------------------------
 def set_state(key: str, value: str) -> None:
     with get_conn() as conn:
@@ -660,3 +832,5 @@ def prune_old_data(days: int | None = None) -> None:
         ):
             ts_col = "sent_at" if table == "alerts_sent" else "snapshot_at"
             conn.execute(f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)", (cutoff,))
+        # Behavioral events feed only the short-window flailing signal; keep them brief.
+        conn.execute("DELETE FROM wallet_behavior_events WHERE ts < datetime('now', ?)", (cutoff,))

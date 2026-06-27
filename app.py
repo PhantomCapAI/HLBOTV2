@@ -53,6 +53,7 @@ def main() -> None:
     app.add_handler(CommandHandler("dexs", h.dexs_cmd))
     app.add_handler(CommandHandler("status", h.status_cmd))
     app.add_handler(CommandHandler("scores", h.scores_cmd))
+    app.add_handler(CommandHandler("wallet", h.wallet_cmd))
     app.add_handler(CommandHandler("candidates", h.candidates_cmd))
     app.add_handler(CommandHandler("track", h.track_cmd))
     app.add_handler(CommandHandler("help", h.help_cmd))

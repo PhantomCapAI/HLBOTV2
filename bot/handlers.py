@@ -17,6 +17,7 @@ from core.entitlements import require_paid, is_paid, paywall_message
 from core.solana_pay import verify_usdc_payment
 from scanner.setups import coin_scan, deep_dive_symbol
 from bot.formatting import format_setup
+from services import wallet_profile as wp
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +218,31 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Coin scan: every {config.COIN_SCAN_INTERVAL_SECONDS}s"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
+
+
+@require_paid()
+async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full dossier for one wallet, by codename or 0x address."""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: <code>/wallet &lt;codename or address&gt;</code>", parse_mode="HTML")
+        return
+    q = context.args[0].strip()
+    if q.lower().startswith("0x"):
+        address = q.lower()
+    else:
+        row = db.get_wallet_profile_by_codename(q)
+        if row is None:
+            await update.message.reply_text(
+                "No tracked wallet by that codename. Check /scores, or pass the 0x address.")
+            return
+        address = row["address"]
+    dossier = wp.format_dossier(address)
+    if dossier is None:
+        await update.message.reply_text(
+            "No profile yet for that wallet — it hasn't been seen in a scan cycle.")
+        return
+    await update.message.reply_text(dossier, parse_mode="HTML")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

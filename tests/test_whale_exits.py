@@ -166,4 +166,6 @@ def test_tiny_base_relabels_opened_new(tmp_db, monkeypatch):
 
     blob = "\n".join(sent)
     assert "WHALE OPENED NEW" in blob
-    assert "%" not in blob          # no meaningless percentage
+    # The meaningless add percentage is gone: no "➕ Added: ... (+X%)" line.
+    assert "Added" not in blob
+    assert "%)" not in blob
