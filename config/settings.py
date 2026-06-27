@@ -114,6 +114,16 @@ WALLET_STATE_ROI_EPS = _f("WALLET_STATE_ROI_EPS", 0.0)
 # Trailing window (minutes) for the flailing signal (flips + stress-adds / hour).
 WALLET_FLAIL_WINDOW_MIN = _i("WALLET_FLAIL_WINDOW_MIN", 60)
 
+# ---- Open-interest trend / funding crowding (market context) ----
+# Lookback windows (minutes) for the ΔOI% deltas. The longer window is the
+# primary classifier when enough history exists, else the shorter one is used.
+OI_LOOKBACK_SHORT_MIN = _i("OI_LOOKBACK_SHORT_MIN", 60)
+OI_LOOKBACK_LONG_MIN = _i("OI_LOOKBACK_LONG_MIN", 240)
+# ΔOI% thresholds: >= RISE = "rising" (building); <= -FALL = "unwind".
+OI_RISE_PCT = _f("OI_RISE_PCT", 5.0)
+OI_FALL_PCT = _f("OI_FALL_PCT", 5.0)
+# "Elevated funding" reuses EXTREME_FUNDING_HR from scanner/screener.py.
+
 # ---- Whale exit / flip / trim detection (the other half of WHALE ADDING) ----
 # A tracked position that shrinks past CLOSE_PCT (of size) — or vanishes — fires
 # WHALE CLOSED; a side reversal fires WHALE FLIPPED. Trims (partial reductions in

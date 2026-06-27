@@ -48,6 +48,7 @@ def main() -> None:
     app.add_handler(CommandHandler("alerts", h.toggle_alerts))
     app.add_handler(CommandHandler("scan", h.scan))
     app.add_handler(CommandHandler("coin", h.coin_cmd))
+    app.add_handler(CommandHandler("flow", h.flow_cmd))
     app.add_handler(CommandHandler("wallets", h.wallets_cmd))
     app.add_handler(CommandHandler("confluence", h.confluence_cmd))
     app.add_handler(CommandHandler("dexs", h.dexs_cmd))

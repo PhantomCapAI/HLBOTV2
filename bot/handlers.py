@@ -16,6 +16,8 @@ from storage import database as db
 from core.entitlements import require_paid, is_paid, paywall_message
 from core.solana_pay import verify_usdc_payment
 from scanner.setups import coin_scan, deep_dive_symbol
+from scanner.screener import flow_for
+from scanner.flow import flow_line
 from bot.formatting import format_setup
 from services import wallet_profile as wp
 
@@ -175,6 +177,36 @@ async def coin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error("/coin error for %s: %s", symbol, e, exc_info=True)
         await update.message.reply_text(f"Error analyzing {symbol}: {str(e)[:150]}")
+
+
+@require_paid()
+async def flow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OI trend + funding crowding read for one coin: /flow SYMBOL."""
+    if not context.args:
+        await update.message.reply_text("Usage: /flow SYMBOL (e.g. /flow BTC)")
+        return
+    symbol = context.args[0]
+    try:
+        ctx = await flow_for(symbol)
+    except Exception as e:
+        log.error("/flow error for %s: %s", symbol, e, exc_info=True)
+        await update.message.reply_text(f"Flow lookup failed: {str(e)[:150]}")
+        return
+    if not ctx:
+        await update.message.reply_text(f"{symbol.upper()} isn't in the perp universe.")
+        return
+    c = ctx["crowding"]
+    short = f"{c['doi_short']:+.0f}%" if c.get("doi_short") is not None else "—"
+    long_ = f"{c['doi_long']:+.0f}%" if c.get("doi_long") is not None else "—"
+    msg = (
+        f"📡 <b>{ctx['coin']} — order-flow context</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{flow_line(c)}\n"
+        f"ΔOI: {short} ({config.OI_LOOKBACK_SHORT_MIN}m) | {long_} ({config.OI_LOOKBACK_LONG_MIN}m)\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"<i>Market context only — not financial advice.</i>"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 
 @require_paid()

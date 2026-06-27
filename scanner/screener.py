@@ -12,6 +12,7 @@ import logging
 import config
 from integrations import hyperliquid as hl
 from scanner.indicators import analyse_tf, position_sizing
+from scanner import flow
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,8 @@ async def _dexs_to_scan() -> list[str]:
         return []
 
 
-def calculate_confluence_score(reads: dict, funding: float = 0.0) -> float:
+def calculate_confluence_score(reads: dict, funding: float = 0.0,
+                               crowding: dict | None = None) -> float:
     """Deterministic 0-100 setup quality score, built to *discriminate*.
 
     The old version saturated (almost everything ~100) because ADX scaled up to
@@ -67,14 +69,20 @@ def calculate_confluence_score(reads: dict, funding: float = 0.0) -> float:
         adx_confirm         10   HARD cap — confirms a trend exists, never scales up
         momentum            10   +DI/-DI (5) and MACD hist (5) agree with direction
         structure           10   4h swing structure matches the direction
-        funding (vs crowd)   5   positioned against an overcrowded funded side
+        funding / OI flow   +8   positioned against a crowded book / for the squeeze
     Penalties (the extension / exhaustion guard), subtracted:
         rsi_extreme        -20   entering into an RSI extreme against the move
         price_stretch      -15   price stretched from EMA21 *and* VWAP (ATR terms)
         adx_exhaustion     -10   blow-off ADX (>45) = late/extended entry
-        funding_crowded    -10   entering the overcrowded funded side
+        funding / OI flow  -12   joining a crowded same-side book; -5 entering an unwind
     Net is clamped to [0, 100]. A fresh, multi-TF-aligned, non-extended trend
     tops out near 85; extended or conflicted setups land materially lower.
+
+    Funding vs OI-crowding (no double count): the plain funding-vs-crowd term
+    (+5 / -10) applies when there's no classified crowding state. When `crowding`
+    carries a crowded_long/short state, that state *already includes* the funding
+    sign, so flow.crowding_modifier SUPERSEDES the funding term (+8 fade / -12
+    join). An 'unwind' state is OI-only and stacks an extra -5 on the funding term.
     """
     primary = reads.get("4h") or reads[sorted(reads)[-1]]
     direction = 1 if primary.lean > 0 else -1 if primary.lean < 0 else 0
@@ -120,11 +128,16 @@ def calculate_confluence_score(reads: dict, funding: float = 0.0) -> float:
     elif direction < 0 and primary.structure.startswith("downtrend"):
         structure_pts = 10.0
 
-    # 6. Funding vs crowd (+5 against the funded side, -10 into it).
+    # 6. Funding vs crowd (+5 against the funded side, -10 into it). Superseded
+    # by the OI-aware crowding modifier when a crowding state is classified, so
+    # funding is never counted twice (see docstring).
     funding_pts = 0.0
     if abs(funding) > EXTREME_FUNDING_HR and direction != 0:
         crowded = 1 if funding > 0 else -1
         funding_pts = -10.0 if direction == crowded else 5.0
+    if crowding:
+        crowd_pts, supersede = flow.crowding_modifier(crowding.get("state"), direction)
+        funding_pts = crowd_pts if supersede else funding_pts + crowd_pts
 
     # 7. RSI extreme against the entry (penalty up to -20): longing into >70 or
     # shorting into <30 is chasing an extended move.
@@ -184,15 +197,21 @@ async def run_scan() -> list[dict]:
         try:
             frames = await _fetch_screen(coin, SCAN_TFS)
             reads = {tf: analyse_tf(tf, frames[tf]) for tf in SCAN_TFS}
+            fund = float(ctx.get("funding") or 0)
+            mark = float(ctx.get("markPx") or 0)
+            oi_usd = float(ctx.get("openInterest") or 0) * mark
+            crowding = flow.oi_context(coin, oi_usd, fund, mark,
+                                       funding_threshold=EXTREME_FUNDING_HR)
             discoveries.append({
                 "coin": coin,
-                "score": calculate_confluence_score(reads, float(ctx.get("funding") or 0)),
+                "score": calculate_confluence_score(reads, fund, crowding=crowding),
                 "regime_4h": reads["4h"].regime,
                 "lean_4h": reads["4h"].lean,
                 "adx_4h": round(reads["4h"].adx, 1),
                 "direction": "long" if reads["4h"].lean > 0 else "short" if reads["4h"].lean < 0 else "none",
-                "funding": float(ctx.get("funding") or 0),
-                "oi_usd": float(ctx.get("openInterest") or 0) * float(ctx.get("markPx") or 0),
+                "funding": fund,
+                "oi_usd": oi_usd,
+                "crowding": crowding,
             })
         except Exception as e:
             errors += 1
@@ -228,15 +247,21 @@ async def scan_specific(coins: list[str]) -> list[dict]:
         except Exception as e:
             log.warning("  correlation scan skip %s: %s: %s", name, type(e).__name__, e)
             continue
+        fund = float(ctx.get("funding") or 0)
+        mark = float(ctx.get("markPx") or 0)
+        oi_usd = float(ctx.get("openInterest") or 0) * mark
+        crowding = flow.oi_context(name, oi_usd, fund, mark,
+                                   funding_threshold=EXTREME_FUNDING_HR)
         out.append({
             "coin": name,
-            "score": calculate_confluence_score(reads, float(ctx.get("funding") or 0)),
+            "score": calculate_confluence_score(reads, fund, crowding=crowding),
             "regime_4h": reads["4h"].regime,
             "lean_4h": reads["4h"].lean,
             "adx_4h": round(reads["4h"].adx, 1),
             "direction": "long" if reads["4h"].lean > 0 else "short" if reads["4h"].lean < 0 else "none",
-            "funding": float(ctx.get("funding") or 0),
-            "oi_usd": float(ctx.get("openInterest") or 0) * float(ctx.get("markPx") or 0),
+            "funding": fund,
+            "oi_usd": oi_usd,
+            "crowding": crowding,
         })
     return out
 
@@ -333,13 +358,42 @@ async def scan_one(symbol: str) -> dict | None:
         log.warning("scan_one failed for %s: %s", coin, e)
         return None
 
+    fund = float(ctx.get("funding") or 0)
+    mark = float(ctx.get("markPx") or 0)
+    oi_usd = float(ctx.get("openInterest") or 0) * mark
+    crowding = flow.oi_context(coin, oi_usd, fund, mark, funding_threshold=EXTREME_FUNDING_HR)
     return {
         "coin": coin,
-        "score": calculate_confluence_score(reads, float(ctx.get("funding") or 0)),
+        "score": calculate_confluence_score(reads, fund, crowding=crowding),
         "regime_4h": reads["4h"].regime,
         "lean_4h": reads["4h"].lean,
         "adx_4h": round(reads["4h"].adx, 1),
         "direction": "long" if reads["4h"].lean > 0 else "short" if reads["4h"].lean < 0 else "none",
-        "funding": float(ctx.get("funding") or 0),
-        "oi_usd": float(ctx.get("openInterest") or 0) * float(ctx.get("markPx") or 0),
+        "funding": fund,
+        "oi_usd": oi_usd,
+        "crowding": crowding,
     }
+
+
+async def flow_for(symbol: str) -> dict | None:
+    """OI/funding crowding context for one coin, for the /flow command. Records a
+    snapshot (so /flow also builds history) and returns {coin, crowding}."""
+    symbol = symbol.upper().lstrip("$").replace("-PERP", "").strip()
+    dexs = await _dexs_to_scan()
+    meta, ctxs = await hl.get_all_meta_and_ctxs(dexs) if dexs else await hl.get_meta_and_ctxs()
+
+    def bare(n: str) -> str:
+        return n.split(":", 1)[1] if ":" in n else n
+
+    idx = next((i for i, a in enumerate(meta)
+                if a["name"].upper() == symbol or bare(a["name"]).upper() == symbol), None)
+    if idx is None:
+        idx = next((i for i, a in enumerate(meta) if symbol in a["name"].upper()), None)
+    if idx is None:
+        return None
+    coin, ctx = meta[idx]["name"], ctxs[idx]
+    fund = float(ctx.get("funding") or 0)
+    mark = float(ctx.get("markPx") or 0)
+    oi_usd = float(ctx.get("openInterest") or 0) * mark
+    return {"coin": coin, "crowding": flow.oi_context(coin, oi_usd, fund, mark,
+                                                      funding_threshold=EXTREME_FUNDING_HR)}
