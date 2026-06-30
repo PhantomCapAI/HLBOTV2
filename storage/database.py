@@ -601,6 +601,39 @@ def is_payment_used(tx_signature: str) -> bool:
     return row is not None
 
 
+def get_payment_reference(chat_id: int) -> int | None:
+    """The chat's bound payment amount in USDC base units (6dp), or None if unset."""
+    raw = get_state(f"pay_ref:{chat_id}")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def assign_payment_reference(chat_id: int) -> int:
+    """Assign (once) a unique, stable USDC amount for this chat — base price plus a
+    per-chat sub-cent nonce in [1, 9999] base units (< $0.01). The cents identify
+    which chat a payment belongs to, binding a payment to its payer (audit C1).
+
+    Returns the full expected amount in base units. Idempotent: the same chat
+    always gets the same amount. NOTE: distinct references are limited to 9999
+    concurrent chats before the nonce wraps (acceptable pre-public; revisit if the
+    user base approaches that)."""
+    existing = get_payment_reference(chat_id)
+    if existing is not None:
+        return existing
+    seq_raw = get_state("pay_ref_seq")
+    try:
+        seq = int(seq_raw) + 1 if seq_raw is not None else 1
+    except (TypeError, ValueError):
+        seq = 1
+    set_state("pay_ref_seq", str(seq))
+    nonce = (seq - 1) % 9999 + 1  # 1..9999 sub-cent base units
+    expected = round(config.PAYMENT_PRICE_USD * 1_000_000) + nonce
+    set_state(f"pay_ref:{chat_id}", str(expected))
+    return expected
+
+
 def mark_free_used(chat_id: int) -> None:
     """Mark this chat's one free /scan as consumed (app_state kv — no active state)."""
     set_state(f"free_used:{chat_id}", "1")

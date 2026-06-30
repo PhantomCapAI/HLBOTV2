@@ -21,6 +21,29 @@ log = logging.getLogger(__name__)
 XAI_URL = "https://api.x.ai/v1/chat/completions"
 
 
+# An LLM-proposed entry must sit within this % of mark to be trusted (audit M4).
+MAX_ENTRY_DEVIATION_PCT = 5.0
+
+
+def _setup_levels_ok(setup: dict, mark: float, direction: str) -> bool:
+    """Sanity-check an LLM setup against the deterministic read (audit M4).
+
+    Rejects (so the caller falls back to local deterministic levels) when the
+    LLM's direction contradicts the technical lean, or its entry is implausibly
+    far from mark. Keeps the bot from rendering hallucinated trade levels.
+    """
+    inner = (setup.get("setups") or [{}])[0]
+    if str(inner.get("direction", "")).lower() != direction:
+        return False
+    try:
+        entry = float(inner.get("entry"))
+    except (TypeError, ValueError):
+        return False
+    if mark > 0 and abs(entry - mark) / mark * 100.0 > MAX_ENTRY_DEVIATION_PCT:
+        return False
+    return True
+
+
 def _extract_mark(d: dict[str, Any]) -> float:
     for c in (d.get("micro", {}).get("mark"), d.get("mark"), d.get("markPx"),
               d.get("entry"), d.get("close")):
@@ -129,6 +152,10 @@ async def generate_setups(discoveries: list[dict]) -> list[dict]:
             coin = d.get("coin", "UNKNOWN")
             mark = _extract_mark(d)
             direction = d.get("direction", "long").lower()
+            if direction not in ("long", "short"):
+                # Neutral 4h lean -> no setup. Never coerce neutral into a short
+                # (audit M5).
+                continue
             side = 1 if direction == "long" else -1
 
             entry = float(d.get("entry") or mark)
@@ -159,6 +186,11 @@ async def generate_setups(discoveries: list[dict]) -> list[dict]:
                     prompt = _build_prompt(coin, context, direction, entry, stop, targets, score)
                     setup = await _call_grok(session, prompt)
                     setup["score"] = score
+                    if not _setup_levels_ok(setup, mark, direction):
+                        log.warning(
+                            "Grok setup for %s failed sanity check (entry/direction); "
+                            "using deterministic levels", coin)
+                        setup = None
                 except aiohttp.ClientResponseError as e:
                     log.warning("Grok fallback for %s: %s", coin, e)
                     if e.status in (401, 403):

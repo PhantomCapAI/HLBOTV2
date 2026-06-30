@@ -40,18 +40,28 @@ def is_paid(chat_id: int) -> bool:
     return paid_until > datetime.now(timezone.utc)
 
 
-def paywall_message() -> str:
+def paywall_message(chat_id: int | None = None) -> str:
     address = (config.PAYMENT_RECEIVING_ADDRESS or "").strip()
-    price = config.PAYMENT_PRICE_USD
     days = config.PAYMENT_VALIDITY_DAYS
     addr_line = (
         f"<code>{address}</code>" if address
         else "<i>(payment address not configured — contact the operator)</i>"
     )
+    if chat_id is not None:
+        # Bind the payment to this payer: a unique sub-cent amount (audit C1).
+        amount = db.assign_payment_reference(chat_id) / 1_000_000
+        price_line = f"Send <b>EXACTLY ${amount:.4f} USDC</b> on <b>Solana</b> to:"
+        exact_note = (
+            "\n⚠️ Send the <b>exact</b> amount above — the final digits identify "
+            "your account. Any other amount can't be matched to you."
+        )
+    else:
+        price_line = f"Send <b>${config.PAYMENT_PRICE_USD:.2f} USDC</b> on <b>Solana</b> to:"
+        exact_note = ""
     return (
         "🔒 <b>This command needs an active pass.</b>\n\n"
-        f"Send <b>${price:.2f} USDC</b> on <b>Solana</b> to:\n"
-        f"{addr_line}\n\n"
+        f"{price_line}\n"
+        f"{addr_line}{exact_note}\n\n"
         f"Then run <code>/paid &lt;tx_signature&gt;</code> to unlock for "
         f"{days} days.\n"
         "Your first /scan is on the house."
@@ -74,7 +84,7 @@ def require_paid(free_taste: bool = False):
                 db.mark_free_used(chat_id)
                 log.info("Free taste used by chat %s", chat_id)
                 return await func(update, context)
-            await update.message.reply_text(paywall_message(), parse_mode="HTML")
+            await update.message.reply_text(paywall_message(chat_id), parse_mode="HTML")
             return None
         return wrapper
     return decorator

@@ -219,7 +219,7 @@ def test_paid_activates(tmp_db, monkeypatch):
     import bot.handlers as h
     _stub_cycles(monkeypatch)
     monkeypatch.setattr(h, "verify_usdc_payment",
-                        lambda tx: _async({"ok": True, "reason": "payment_verified"}))
+                        lambda tx, expected_units=None: _async({"ok": True, "reason": "payment_verified"}))
     upd, ctx = FakeUpdate(7), FakeContext(args=[SIG])
     asyncio.run(h.paid_cmd(upd, ctx))
     assert db.is_payment_used(SIG) is True
@@ -233,7 +233,7 @@ def test_paid_reused_rejected(tmp_db, monkeypatch):
     db.mark_payment_used(SIG, 1)  # already redeemed by someone
     called = {"v": False}
 
-    def _verify(tx):
+    def _verify(tx, expected_units=None):
         called["v"] = True
         return _async({"ok": True})
     monkeypatch.setattr(h, "verify_usdc_payment", _verify)
@@ -255,7 +255,7 @@ def test_paid_no_arg(tmp_db):
 def test_paid_verify_failure_no_activation(tmp_db, monkeypatch):
     import bot.handlers as h
     monkeypatch.setattr(h, "verify_usdc_payment",
-                        lambda tx: _async({"ok": False, "reason": "amount_too_low"}))
+                        lambda tx, expected_units=None: _async({"ok": False, "reason": "amount_too_low"}))
     upd, ctx = FakeUpdate(7), FakeContext(args=[SIG])
     asyncio.run(h.paid_cmd(upd, ctx))
     assert ent.is_paid(7) is False
@@ -347,6 +347,137 @@ def test_expired_paid_drops_from_active(tmp_db):
     db.set_paid_until(3, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
     assert 3 not in db.get_active_chats()      # expired → not active
     assert 3 not in db.get_alert_chats()
+
+
+# --------------------------- C1: payment bound to payer ---------------------------
+def test_amount_matches_reference_ok(tmp_db, monkeypatch):
+    """A tx whose USDC amount equals the chat's bound reference verifies."""
+    _patch_rpc(monkeypatch, _result(3_000_041))
+    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_000_041))
+    assert out["ok"] is True, out
+
+
+def test_amount_mismatch_rejected(tmp_db, monkeypatch):
+    """A tx paying a DIFFERENT chat's reference amount is rejected (the binding)."""
+    _patch_rpc(monkeypatch, _result(3_000_041))   # paid chat A's amount
+    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_000_023))  # chat B's ref
+    assert out["ok"] is False and out["reason"] == "amount_mismatch", out
+
+
+def test_payment_reference_is_unique_and_stable(tmp_db):
+    a1 = db.assign_payment_reference(1)
+    a2 = db.assign_payment_reference(1)   # stable for the same chat
+    b = db.assign_payment_reference(2)
+    assert a1 == a2
+    assert a1 != b                        # unique across chats
+    base = round(config.PAYMENT_PRICE_USD * 1_000_000)
+    assert base < a1 < base + 10_000      # sub-cent nonce ($0.00 < add < $0.01)
+    assert db.get_payment_reference(1) == a1
+
+
+def test_payment_bound_to_payer(tmp_db, monkeypatch):
+    """A different chat cannot redeem another chat's payment (the C1 exploit)."""
+    import bot.handlers as h
+    _stub_cycles(monkeypatch)
+    a_units = db.assign_payment_reference(1)
+    b_units = db.assign_payment_reference(2)
+    assert a_units != b_units
+
+    # The real on-chain tx paid chat A's unique amount; verify enforces the match.
+    def fake_verify(tx, expected_units=None):
+        received = a_units
+        ok = expected_units is not None and received == expected_units
+        return _async({"ok": ok,
+                       "reason": "payment_verified" if ok else "amount_mismatch",
+                       "received": received})
+    monkeypatch.setattr(h, "verify_usdc_payment", fake_verify)
+
+    # Attacker chat B submits chat A's signature -> rejected, tx not burned.
+    ub = FakeUpdate(2)
+    asyncio.run(h.paid_cmd(ub, FakeContext(args=[SIG])))
+    assert ent.is_paid(2) is False
+    assert db.is_payment_used(SIG) is False
+    assert any("match" in r.lower() for r in ub.message.replies), ub.message.replies
+
+    # Rightful chat A redeems its own tx -> granted.
+    ua = FakeUpdate(1)
+    asyncio.run(h.paid_cmd(ua, FakeContext(args=[SIG])))
+    assert ent.is_paid(1) is True
+    assert db.is_payment_used(SIG) is True
+
+
+# --------------------------- H1/H2: /start rendering ---------------------------
+def test_start_unpaid_shows_only_paywall(tmp_db):
+    import bot.handlers as h
+    upd = FakeUpdate(50)
+    asyncio.run(h.start(upd, FakeContext()))
+    body = " ".join(upd.message.replies).lower()
+    assert "active pass" in body            # paywall present
+    assert "you're active" not in body      # no active confirmation
+
+
+def test_start_paid_shows_only_active(tmp_db):
+    import bot.handlers as h
+    db.set_paid_until(51, (datetime.now(timezone.utc) + timedelta(days=3)).isoformat())
+    upd = FakeUpdate(51)
+    asyncio.run(h.start(upd, FakeContext()))
+    body = " ".join(upd.message.replies).lower()
+    assert "you're active" in body
+    assert "active pass" not in body        # paywall must NOT also render
+
+
+def test_start_owner_no_expiry(tmp_db, monkeypatch):
+    import bot.handlers as h
+    monkeypatch.setattr(config, "OWNER_CHAT_ID", 999)
+    upd = FakeUpdate(999)
+    asyncio.run(h.start(upd, FakeContext()))
+    body = " ".join(upd.message.replies)
+    assert "operator" in body.lower()       # owner-specific copy
+    assert "until —" not in body            # never the null dash
+    assert "active pass" not in body.lower()
+
+
+# --------------------------- M1: global seed flag ---------------------------
+def test_stop_does_not_reset_seed_or_pause_others(tmp_db):
+    import bot.handlers as h
+    from services import cycles
+    db.set_state("wallet_seeded", "1")
+    fut = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    db.set_paid_until(1, fut)
+    db.set_paid_until(2, fut)
+    asyncio.run(h.stop_cmd(FakeUpdate(2), FakeContext()))   # chat 2 stops
+    assert db.get_state("wallet_seeded") == "1"             # not reset
+    assert cycles._should_run() is True                     # chat 1 still active
+
+
+def test_paid_does_not_reset_seed(tmp_db, monkeypatch):
+    import bot.handlers as h
+    _stub_cycles(monkeypatch)
+    monkeypatch.setattr(h, "verify_usdc_payment",
+                        lambda tx, expected_units=None: _async(
+                            {"ok": True, "reason": "payment_verified", "received": expected_units}))
+    db.set_state("wallet_seeded", "1")
+    asyncio.run(h.paid_cmd(FakeUpdate(8), FakeContext(args=[SIG])))
+    assert db.get_state("wallet_seeded") == "1"             # already seeded -> untouched
+    assert ent.is_paid(8) is True
+
+
+def test_seed_job_does_not_broadcast(tmp_db, monkeypatch):
+    from services import cycles
+    called = {"b": False}
+
+    async def fake_cycle(*a, **k):
+        return None
+
+    async def fake_broadcast(*a, **k):
+        called["b"] = True
+        return True
+
+    monkeypatch.setattr(cycles, "_wallet_cycle", fake_cycle)
+    monkeypatch.setattr(cycles.tg, "broadcast", fake_broadcast)
+    asyncio.run(cycles.wallet_seed_job(None))
+    assert db.get_state("wallet_seeded") == "1"
+    assert called["b"] is False             # no broadcast to unrelated chats
 
 
 # --------------------------- helper ---------------------------
