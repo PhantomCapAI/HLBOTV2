@@ -69,6 +69,25 @@ BANNER = (
 )
 
 
+def _activate_entitled(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Land an entitled chat (paid OR operator) in the active/alert set so the
+    proactive whale/confluence/liquidation pushes actually reach it.
+
+    Without this an entitled chat shows "active" copy but never enters
+    get_alert_chats(), so only on-demand /scan works. Idempotent:
+      * activate_chat upserts active=1 (and alerts_enabled=1 for a fresh row);
+      * we (re)enable alerts so a prior /stop+/alerts-off chat re-arms on /start;
+      * the wallet baseline is seeded once globally, guarded by the wallet_seeded
+        flag — never re-seeded per chat (that would pause the cycle for others, M1).
+    """
+    db.activate_chat(chat_id)
+    if not db.get_alerts_enabled(chat_id):
+        db.set_alerts_enabled(chat_id, True)
+    if db.get_state("wallet_seeded") != "1" and context.job_queue:
+        from services import cycles
+        context.job_queue.run_once(cycles.wallet_seed_job, when=2)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome + how-to-pay. /start never activates for free — every /start
     routes through payment. Paying opens access for up to PAYMENT_VALIDITY_DAYS
@@ -78,9 +97,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Renders exactly one of two things, never both (audit H1):
       * active chats (incl. the operator) -> the active confirmation only;
       * everyone else -> the paywall only.
+
+    An entitled chat is also *actually* activated here (not just shown active
+    copy) so it enters get_alert_chats and the proactive pushes flow.
     """
     chat_id = update.effective_chat.id
     if is_paid(chat_id):
+        _activate_entitled(chat_id, context)
         raw = db.get_paid_until(chat_id)
         if raw:
             access_line = (
@@ -136,12 +159,9 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.mark_payment_used(tx, chat_id)
     paid_until = datetime.now(timezone.utc) + timedelta(days=config.PAYMENT_VALIDITY_DAYS)
     db.set_paid_until(chat_id, paid_until.isoformat())
-    db.activate_chat(chat_id)
-    # Seed the wallet baseline once, globally — never reset it on a per-chat
-    # activation (that would pause the wallet cycle for every other user, audit M1).
-    from services import cycles
-    if db.get_state("wallet_seeded") != "1" and context.job_queue:
-        context.job_queue.run_once(cycles.wallet_seed_job, when=2)
+    # A paying user is activated for proactive alerts here, without needing a
+    # second /start. Seeding the wallet baseline stays global + idempotent (M1).
+    _activate_entitled(chat_id, context)
     await update.message.reply_text(
         "✅ <b>Payment verified — you're in.</b>\n"
         f"Access active until <b>{paid_until.strftime('%Y-%m-%d %H:%M UTC')}</b>.\n\n"

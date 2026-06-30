@@ -200,10 +200,19 @@ class FakeUpdate:
         self.message = FakeMessage()
 
 
+class FakeJobQueue:
+    """Records run_once schedules so tests can assert the wallet seed is queued."""
+    def __init__(self):
+        self.jobs = []
+
+    def run_once(self, callback, when=None, **kw):
+        self.jobs.append((callback, when))
+
+
 class FakeContext:
-    def __init__(self, args=None):
+    def __init__(self, args=None, job_queue=None):
         self.args = args or []
-        self.job_queue = None
+        self.job_queue = job_queue
 
 
 def _stub_cycles(monkeypatch):
@@ -468,6 +477,62 @@ def test_start_owner_no_expiry(tmp_db, monkeypatch):
     assert "operator" in body.lower()       # owner-specific copy
     assert "until —" not in body            # never the null dash
     assert "active pass" not in body.lower()
+
+
+# --------------------------- /start actually activates entitled chats ---------------------------
+def test_start_paid_lands_in_alert_chats_and_seeds(tmp_db, monkeypatch):
+    """An entitled (paid) chat that runs /start enters get_alert_chats so the
+    proactive pushes flow, and the wallet seed is scheduled for the cycle."""
+    import bot.handlers as h
+    _stub_cycles(monkeypatch)
+    from services import cycles
+    db.set_paid_until(60, (datetime.now(timezone.utc) + timedelta(days=3)).isoformat())
+    db.deactivate_chat(60)                    # prove /start (not set_paid_until) activates
+    assert 60 not in db.get_alert_chats()
+    ctx = FakeContext(job_queue=FakeJobQueue())
+    asyncio.run(h.start(FakeUpdate(60), ctx))
+    assert 60 in db.get_alert_chats()         # now receives proactive alerts
+    assert db.get_alerts_enabled(60) is True
+    # the wallet baseline is scheduled so the proactive cycle can run
+    assert any(cb is cycles.wallet_seed_job for cb, _ in ctx.job_queue.jobs)
+
+
+def test_start_owner_active_and_alert_enabled(tmp_db, monkeypatch):
+    """The operator (no paid_until) is genuinely activated by /start and lands in
+    both get_active_chats and get_alert_chats — without a fake entitlement."""
+    import bot.handlers as h
+    monkeypatch.setattr(config, "OWNER_CHAT_ID", 888)
+    _stub_cycles(monkeypatch)
+    assert 888 not in db.get_active_chats()   # not activated before /start
+    ctx = FakeContext(job_queue=FakeJobQueue())
+    asyncio.run(h.start(FakeUpdate(888), ctx))
+    assert 888 in db.get_active_chats()       # active despite no paid_until
+    assert db.get_alerts_enabled(888) is True
+    assert 888 in db.get_alert_chats()        # operator receives proactive alerts
+    assert db.get_paid_until(888) is None     # still operator (no expiry), no fake entitlement
+
+
+def test_start_unpaid_not_activated(tmp_db):
+    """A non-paid, non-owner chat is NOT activated by /start — only the paywall."""
+    import bot.handlers as h
+    ctx = FakeContext(job_queue=FakeJobQueue())
+    asyncio.run(h.start(FakeUpdate(61), ctx))
+    assert 61 not in db.get_active_chats()
+    assert 61 not in db.get_alert_chats()
+    assert db.get_alerts_enabled(61) is False
+    assert ctx.job_queue.jobs == []           # no wallet seed for an unpaid chat
+
+
+def test_paid_lands_in_alert_chats(tmp_db, monkeypatch):
+    """A successful /paid activates for proactive alerts without a second /start."""
+    import bot.handlers as h
+    _stub_cycles(monkeypatch)
+    monkeypatch.setattr(h, "verify_usdc_payment",
+                        lambda tx, expected_units=None: _async(
+                            {"ok": True, "reason": "payment_verified", "received": expected_units}))
+    asyncio.run(h.paid_cmd(FakeUpdate(62), FakeContext(args=[SIG], job_queue=FakeJobQueue())))
+    assert ent.is_paid(62) is True
+    assert 62 in db.get_alert_chats()
 
 
 # --------------------------- M1: global seed flag ---------------------------

@@ -539,22 +539,35 @@ def get_alerts_enabled(chat_id: int) -> bool:
 
 
 def get_active_chats() -> list[int]:
-    # "Active" now means: switched on AND holding a live paid_until entitlement,
-    # so background work and alerts are driven by payment, not just the toggle.
+    # "Active" now means: switched on AND entitled — either holding a live
+    # paid_until window, or being the operator (no expiry). Background work and
+    # alerts are driven by entitlement, not just the toggle. The operator has no
+    # paid_until, so it must be admitted explicitly or it would never qualify.
+    owner = config.OWNER_CHAT_ID or None
     with get_conn() as conn:
         return [r["chat_id"] for r in conn.execute(
             """SELECT chat_id FROM subscribers
-               WHERE active=1 AND paid_until IS NOT NULL
-                 AND datetime(paid_until) > datetime('now')"""
+               WHERE active=1 AND (
+                   (paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))
+                   OR chat_id = ?
+               )""",
+            (owner,),
         ).fetchall()]
 
 
 def get_alert_chats() -> list[int]:
+    # Same entitlement rule as get_active_chats, additionally gated on the
+    # alerts-enabled toggle. Includes the operator (no paid_until) so proactive
+    # whale/confluence/liquidation pushes actually reach it.
+    owner = config.OWNER_CHAT_ID or None
     with get_conn() as conn:
         return [r["chat_id"] for r in conn.execute(
             """SELECT chat_id FROM subscribers
-               WHERE active=1 AND alerts_enabled=1 AND paid_until IS NOT NULL
-                 AND datetime(paid_until) > datetime('now')"""
+               WHERE active=1 AND alerts_enabled=1 AND (
+                   (paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))
+                   OR chat_id = ?
+               )""",
+            (owner,),
         ).fetchall()]
 
 
