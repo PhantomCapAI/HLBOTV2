@@ -352,16 +352,47 @@ def test_expired_paid_drops_from_active(tmp_db):
 # --------------------------- C1: payment bound to payer ---------------------------
 def test_amount_matches_reference_ok(tmp_db, monkeypatch):
     """A tx whose USDC amount equals the chat's bound reference verifies."""
-    _patch_rpc(monkeypatch, _result(3_000_041))
-    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_000_041))
+    _patch_rpc(monkeypatch, _result(3_020_000))
+    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_020_000))
     assert out["ok"] is True, out
 
 
 def test_amount_mismatch_rejected(tmp_db, monkeypatch):
-    """A tx paying a DIFFERENT chat's reference amount is rejected (the binding)."""
-    _patch_rpc(monkeypatch, _result(3_000_041))   # paid chat A's amount
-    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_000_023))  # chat B's ref
+    """A tx paying a DIFFERENT chat's reference (a full nonce-spacing away) is
+    rejected — the binding still holds with the one-cent window."""
+    _patch_rpc(monkeypatch, _result(3_040_000))   # another chat's slot (+0.02)
+    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_020_000))
     assert out["ok"] is False and out["reason"] == "amount_mismatch", out
+
+
+def test_overpay_within_window_accepted(tmp_db, monkeypatch):
+    """A slight over/round-up (under a cent) still lands in this chat's window."""
+    _patch_rpc(monkeypatch, _result(3_020_000 + 5_000))   # +0.005 USDC
+    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_020_000))
+    assert out["ok"] is True, out
+
+
+def test_overpay_beyond_window_rejected(tmp_db, monkeypatch):
+    """An over-pay of >= 0.01 USDC is rejected so it can't collide into the next
+    chat's nonce slot (the window is half-open at reference + 0.01)."""
+    _patch_rpc(monkeypatch, _result(3_020_000 + 10_000))   # exactly +0.01 USDC
+    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_020_000))
+    assert out["ok"] is False and out["reason"] == "amount_mismatch", out
+
+
+def test_below_reference_rejected(tmp_db, monkeypatch):
+    """Anything below the reference is still rejected (under-payment)."""
+    _patch_rpc(monkeypatch, _result(3_020_000 - 1))
+    out = asyncio.run(solana_pay.verify_usdc_payment(SIG, expected_units=3_020_000))
+    assert out["ok"] is False and out["reason"] == "amount_too_low", out
+
+
+def test_window_smaller_than_nonce_spacing():
+    """The accept window must be strictly smaller than the nonce spacing, so two
+    chats' windows can never overlap."""
+    from core.solana_pay import PAYMENT_AMOUNT_WINDOW_UNITS
+    from storage.database import PAYMENT_REF_STEP_UNITS
+    assert PAYMENT_AMOUNT_WINDOW_UNITS < PAYMENT_REF_STEP_UNITS
 
 
 def test_payment_reference_is_unique_and_stable(tmp_db):
@@ -371,7 +402,9 @@ def test_payment_reference_is_unique_and_stable(tmp_db):
     assert a1 == a2
     assert a1 != b                        # unique across chats
     base = round(config.PAYMENT_PRICE_USD * 1_000_000)
-    assert base < a1 < base + 10_000      # sub-cent nonce ($0.00 < add < $0.01)
+    assert a1 > base
+    assert (a1 - base) % db.PAYMENT_REF_STEP_UNITS == 0          # on the spacing grid
+    assert abs(b - a1) >= db.PAYMENT_REF_STEP_UNITS              # spacing >= window
     assert db.get_payment_reference(1) == a1
 
 

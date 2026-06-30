@@ -112,8 +112,9 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Usage: <code>/paid &lt;tx_signature&gt;</code>\n"
-            f"Pay <b>EXACTLY ${expected / 1_000_000:.4f} USDC</b> (Solana) to the "
-            "address from /start, then send the transaction signature here.",
+            f"Pay <b>${expected / 1_000_000:.4f} USDC</b> (Solana — rounding up by "
+            "under a cent is fine) to the address from /start, then send the "
+            "transaction signature here.",
             parse_mode="HTML",
         )
         return

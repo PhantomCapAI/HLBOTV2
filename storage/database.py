@@ -601,6 +601,15 @@ def is_payment_used(tx_signature: str) -> bool:
     return row is not None
 
 
+# Spacing between consecutive chats' bound amounts, in USDC base units (6dp).
+# 20_000 = $0.02. This MUST stay strictly greater than the verifier's accept
+# window (core.solana_pay.PAYMENT_AMOUNT_WINDOW_UNITS = 10_000 = $0.01) so two
+# chats' acceptance windows never overlap and an over-pay within a chat's window
+# can't reach the next chat's slot (audit C1).
+PAYMENT_REF_STEP_UNITS = 20_000
+_PAYMENT_REF_MAX_SLOTS = 9_999
+
+
 def get_payment_reference(chat_id: int) -> int | None:
     """The chat's bound payment amount in USDC base units (6dp), or None if unset."""
     raw = get_state(f"pay_ref:{chat_id}")
@@ -612,13 +621,13 @@ def get_payment_reference(chat_id: int) -> int | None:
 
 def assign_payment_reference(chat_id: int) -> int:
     """Assign (once) a unique, stable USDC amount for this chat — base price plus a
-    per-chat sub-cent nonce in [1, 9999] base units (< $0.01). The cents identify
-    which chat a payment belongs to, binding a payment to its payer (audit C1).
+    per-chat nonce on a $0.02 grid. The trailing cents identify which chat a
+    payment belongs to, binding a payment to its payer (audit C1).
 
     Returns the full expected amount in base units. Idempotent: the same chat
-    always gets the same amount. NOTE: distinct references are limited to 9999
-    concurrent chats before the nonce wraps (acceptable pre-public; revisit if the
-    user base approaches that)."""
+    always gets the same amount. NOTE: references are spaced $0.02 apart, so the
+    Nth chat pays ~$0.02*N above the base price; distinct slots wrap after 9999
+    chats (acceptable pre-public; revisit if the user base approaches either)."""
     existing = get_payment_reference(chat_id)
     if existing is not None:
         return existing
@@ -628,8 +637,8 @@ def assign_payment_reference(chat_id: int) -> int:
     except (TypeError, ValueError):
         seq = 1
     set_state("pay_ref_seq", str(seq))
-    nonce = (seq - 1) % 9999 + 1  # 1..9999 sub-cent base units
-    expected = round(config.PAYMENT_PRICE_USD * 1_000_000) + nonce
+    slot = (seq - 1) % _PAYMENT_REF_MAX_SLOTS + 1   # 1.._PAYMENT_REF_MAX_SLOTS
+    expected = round(config.PAYMENT_PRICE_USD * 1_000_000) + slot * PAYMENT_REF_STEP_UNITS
     set_state(f"pay_ref:{chat_id}", str(expected))
     return expected
 

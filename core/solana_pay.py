@@ -38,6 +38,14 @@ log = logging.getLogger(__name__)
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
 
+# Bound-payment accept window, in USDC base units: a payment for an exact per-chat
+# reference is accepted in [reference, reference + window), i.e. an over/round-up
+# of strictly under $0.01 still counts for that chat. MUST stay strictly smaller
+# than the per-chat nonce spacing (storage.database.PAYMENT_REF_STEP_UNITS =
+# 20_000 = $0.02) so windows never overlap and an over-pay can't land in the next
+# chat's slot (audit C1).
+PAYMENT_AMOUNT_WINDOW_UNITS = 10_000  # $0.01
+
 # Base58 alphabet (Bitcoin/Solana variant) — no 0, O, I, l.
 _B58_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 
@@ -95,9 +103,11 @@ async def verify_usdc_payment(tx_signature: str, expected_units: int | None = No
         (mint + recipient + amount in one check).
 
     Amount rule (audit C1 — bind a payment to its payer):
-      * ``expected_units`` set -> the received amount must EXACTLY equal it (the
-        per-chat unique amount; a different chat's amount won't match), else
-        ``amount_mismatch``.
+      * ``expected_units`` set -> the received amount must fall in the half-open
+        window ``[expected_units, expected_units + PAYMENT_AMOUNT_WINDOW_UNITS)``
+        (the per-chat unique amount, tolerating an over/round-up of under $0.01).
+        Below the reference -> ``amount_too_low``; at/above the window (another
+        chat's slot) -> ``amount_mismatch``.
       * ``expected_units`` None -> legacy behaviour: received must be at least the
         base price (``amount_too_low`` otherwise).
     """
@@ -168,9 +178,13 @@ async def verify_usdc_payment(tx_signature: str, expected_units: int | None = No
         received += post_amt - pre_map.get(idx, 0)
 
     if expected_units is not None:
-        # Bound payment: the cents identify the chat, so the amount must match
-        # exactly. A payment intended for another chat will not match.
-        if received != expected_units:
+        # Bound payment: accept a sub-cent window [reference, reference + $0.01) so
+        # a slight over/round-up still counts for this chat, while a full
+        # nonce-spacing away ($0.02) — another chat's slot — does not. Under the
+        # reference is under-payment.
+        if received < expected_units:
+            return {"ok": False, "reason": "amount_too_low", "received": received}
+        if received >= expected_units + PAYMENT_AMOUNT_WINDOW_UNITS:
             return {"ok": False, "reason": "amount_mismatch", "received": received}
     elif received < base_units:
         return {"ok": False, "reason": "amount_too_low", "received": received}

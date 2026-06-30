@@ -50,10 +50,11 @@ def paywall_message(chat_id: int | None = None) -> str:
     if chat_id is not None:
         # Bind the payment to this payer: a unique sub-cent amount (audit C1).
         amount = db.assign_payment_reference(chat_id) / 1_000_000
-        price_line = f"Send <b>EXACTLY ${amount:.4f} USDC</b> on <b>Solana</b> to:"
+        price_line = f"Send <b>${amount:.4f} USDC</b> on <b>Solana</b> to:"
         exact_note = (
-            "\n⚠️ Send the <b>exact</b> amount above — the final digits identify "
-            "your account. Any other amount can't be matched to you."
+            "\n⚠️ Send this <b>exact</b> amount (rounding up by under a cent is "
+            "fine) — the trailing digits identify your account. A different amount "
+            "can't be matched to you."
         )
     else:
         price_line = f"Send <b>${config.PAYMENT_PRICE_USD:.2f} USDC</b> on <b>Solana</b> to:"
