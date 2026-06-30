@@ -36,6 +36,10 @@ _PAID_REASONS = {
     "no_usdc_to_recipient": "I don't see a USDC payment to our address in that transaction.",
     "unexpected_token_decimals": "That token doesn't look like USDC.",
     "amount_too_low": f"That payment is below the required ${config.PAYMENT_PRICE_USD:.2f} USDC.",
+    "amount_mismatch": (
+        "That payment's amount doesn't match your account's unique amount. "
+        "Send the EXACT amount shown by /start (the final digits identify you)."
+    ),
 }
 
 
@@ -65,36 +69,75 @@ BANNER = (
 )
 
 
+def _activate_entitled(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Land an entitled chat (paid OR operator) in the active/alert set so the
+    proactive whale/confluence/liquidation pushes actually reach it.
+
+    Without this an entitled chat shows "active" copy but never enters
+    get_alert_chats(), so only on-demand /scan works. Idempotent:
+      * activate_chat upserts active=1 (and alerts_enabled=1 for a fresh row);
+      * we (re)enable alerts so a prior /stop+/alerts-off chat re-arms on /start;
+      * the wallet baseline is seeded once globally, guarded by the wallet_seeded
+        flag — never re-seeded per chat (that would pause the cycle for others, M1).
+    """
+    db.activate_chat(chat_id)
+    if not db.get_alerts_enabled(chat_id):
+        db.set_alerts_enabled(chat_id, True)
+    if db.get_state("wallet_seeded") != "1" and context.job_queue:
+        from services import cycles
+        context.job_queue.run_once(cycles.wallet_seed_job, when=2)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome + how-to-pay. /start never activates for free — every /start
-    routes through payment. Paying ($3 USDC) opens access for up to 3 days
-    ($1/day); after that the user repays. Background alerts + value commands
-    are driven by the paid window."""
+    routes through payment. Paying opens access for up to PAYMENT_VALIDITY_DAYS
+    (~$1/day); after that the user repays. Background alerts + value commands are
+    driven by the paid window.
+
+    Renders exactly one of two things, never both (audit H1):
+      * active chats (incl. the operator) -> the active confirmation only;
+      * everyone else -> the paywall only.
+
+    An entitled chat is also *actually* activated here (not just shown active
+    copy) so it enters get_alert_chats and the proactive pushes flow.
+    """
     chat_id = update.effective_chat.id
-    header = (
+    if is_paid(chat_id):
+        _activate_entitled(chat_id, context)
+        raw = db.get_paid_until(chat_id)
+        if raw:
+            access_line = (
+                f"Access runs until <b>{_fmt_until(raw)}</b>. "
+                "Paying again refills your time."
+            )
+        else:
+            # Operator bypass has no paid_until — don't render a null "—" (audit H2).
+            access_line = "Access: <b>operator (no expiry)</b>."
+        await update.message.reply_text(
+            "✅ <b>You're active.</b>\n" + access_line + "\n\n" + BANNER,
+            parse_mode="HTML",
+        )
+        return
+
+    intro = (
         "👋 <b>HL Intel — pay to use.</b>\n\n"
-        f"<b>${config.PAYMENT_PRICE_USD:.2f} USDC</b> on Solana opens the scanner "
-        f"(value commands + proactive alerts) for up to "
+        f"A pass opens the scanner (value commands + proactive alerts) for up to "
         f"<b>{config.PAYMENT_VALIDITY_DAYS} days</b> — about $1/day.\n\n"
     )
-    if is_paid(chat_id):
-        raw = db.get_paid_until(chat_id)
-        header = (
-            "✅ <b>You're active.</b>\n"
-            f"Access runs until <b>{_fmt_until(raw)}</b>. "
-            "Paying again refills your time.\n\n"
-        )
-    await update.message.reply_text(header + paywall_message(), parse_mode="HTML")
+    await update.message.reply_text(intro + paywall_message(chat_id), parse_mode="HTML")
 
 
 async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Redeem a Solana USDC payment: /paid <tx_signature>."""
     chat_id = update.effective_chat.id
+    # The chat's bound, unique amount — verification requires an exact match (C1).
+    expected = db.assign_payment_reference(chat_id)
     if not context.args:
         await update.message.reply_text(
             "Usage: <code>/paid &lt;tx_signature&gt;</code>\n"
-            f"Pay ${config.PAYMENT_PRICE_USD:.2f} USDC (Solana) first, then send "
-            "the transaction signature here.",
+            f"Pay <b>${expected / 1_000_000:.4f} USDC</b> (Solana — rounding up by "
+            "under a cent is fine) to the address from /start, then send the "
+            "transaction signature here.",
             parse_mode="HTML",
         )
         return
@@ -106,7 +149,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("⏳ Verifying your payment on Solana...")
-    result = await verify_usdc_payment(tx)
+    result = await verify_usdc_payment(tx, expected_units=expected)
     if not result.get("ok"):
         reason = _PAID_REASONS.get(result.get("reason"), "Payment could not be verified.")
         await update.message.reply_text(f"❌ {reason}")
@@ -116,11 +159,9 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.mark_payment_used(tx, chat_id)
     paid_until = datetime.now(timezone.utc) + timedelta(days=config.PAYMENT_VALIDITY_DAYS)
     db.set_paid_until(chat_id, paid_until.isoformat())
-    db.activate_chat(chat_id)
-    db.set_state("wallet_seeded", "0")  # fresh baseline on activation
-    from services import cycles
-    if context.job_queue:
-        context.job_queue.run_once(cycles.wallet_seed_job, when=2)
+    # A paying user is activated for proactive alerts here, without needing a
+    # second /start. Seeding the wallet baseline stays global + idempotent (M1).
+    _activate_entitled(chat_id, context)
     await update.message.reply_text(
         "✅ <b>Payment verified — you're in.</b>\n"
         f"Access active until <b>{paid_until.strftime('%Y-%m-%d %H:%M UTC')}</b>.\n\n"
@@ -132,7 +173,8 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     db.deactivate_chat(chat_id)
-    db.set_state("wallet_seeded", "0")
+    # Do NOT reset the global wallet-seed flag here: one chat stopping must not
+    # pause the wallet cycle (or force a re-seed) for everyone else (audit M1).
     await update.message.reply_text("🔴 Scanner OFF. Toggle back on with /start.")
 
 

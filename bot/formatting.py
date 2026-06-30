@@ -7,8 +7,16 @@ Visually identical to the live cards in the screenshot. Dynamic text is escaped.
 import html
 
 from utils.fmt import fmt
-from utils.sizing import position_size
 from scanner.flow import flow_line
+
+# Conviction-scaled risk %: the only sizing figure shown publicly. Replaces the
+# operator-equity dollar size + unit count, which are meaningless to other users.
+_RISK_PCT_BY_CONVICTION = {"HIGH": 3, "MED": 2, "LOW": 1}
+
+
+def _risk_pct_for(conf: str) -> int:
+    """Risk % from the conviction label: HIGH 3 / MED 2 / LOW 1 (default 1)."""
+    return _RISK_PCT_BY_CONVICTION.get((conf or "").upper(), 1)
 
 
 def _esc(v) -> str:
@@ -52,9 +60,9 @@ def format_setup(s: dict) -> str:
         else:
             conf_emoji = "🌫 LOW"
 
-        sizing = position_size(float(setup.get("entry", 0) or 0), float(setup.get("stop", 0) or 0))
         targets = setup.get("targets") or [0, 0, 0]
         targets = (list(targets) + [0, 0, 0])[:3]
+        risk_pct = _risk_pct_for(conf)
 
         msg += f"\n\n{dir_emoji}  |  {conf_emoji}"
         msg += f"\n\n🎯 Entry:  <code>{fmt(setup.get('entry'))}</code>"
@@ -62,8 +70,7 @@ def format_setup(s: dict) -> str:
         msg += (f"\n💰 TP1:    <code>{fmt(targets[0])}</code>\n"
                 f"💰 TP2:    <code>{fmt(targets[1])}</code>\n"
                 f"💰 TP3:    <code>{fmt(targets[2])}</code>")
-        msg += f"\n\n⚙️ Leverage: {setup.get('leverage_set', 5)}x  |  Risk: {setup.get('risk_pct_at_leverage', 1)}%"
-        msg += f"\n💵 Size: ~${sizing['size_usd']} ({sizing['size_units']} units)"
+        msg += f"\n\n⚙️ Leverage: {setup.get('leverage_set', 5)}x  |  Risk: {risk_pct}% of account"
         msg += f"\n\n🧠 {_esc(setup.get('rationale'))}"
         msg += f"\n❌ Invalidation: {_esc(setup.get('invalidation'))}"
         msg += "\n\n─────────────────"

@@ -349,9 +349,12 @@ async def _discovery_cycle() -> None:
 
 # --------------------------- JobQueue callbacks ---------------------------
 async def wallet_seed_job(context) -> None:
+    # Seeds the wallet baseline once, globally. Intentionally does NOT broadcast a
+    # "baseline set" message: it ran on one chat's activation and is irrelevant
+    # (and confusing) to every other subscriber (audit M1).
     await _wallet_cycle(seed_mode=True)
     db.set_state("wallet_seeded", "1")
-    await tg.broadcast(text="✅ Wallet baseline set — change alerts are now active.")
+    log.info("Wallet baseline seeded; change alerts active.")
 
 
 async def wallet_job(context) -> None:

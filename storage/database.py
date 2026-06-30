@@ -539,22 +539,35 @@ def get_alerts_enabled(chat_id: int) -> bool:
 
 
 def get_active_chats() -> list[int]:
-    # "Active" now means: switched on AND holding a live paid_until entitlement,
-    # so background work and alerts are driven by payment, not just the toggle.
+    # "Active" now means: switched on AND entitled — either holding a live
+    # paid_until window, or being the operator (no expiry). Background work and
+    # alerts are driven by entitlement, not just the toggle. The operator has no
+    # paid_until, so it must be admitted explicitly or it would never qualify.
+    owner = config.OWNER_CHAT_ID or None
     with get_conn() as conn:
         return [r["chat_id"] for r in conn.execute(
             """SELECT chat_id FROM subscribers
-               WHERE active=1 AND paid_until IS NOT NULL
-                 AND datetime(paid_until) > datetime('now')"""
+               WHERE active=1 AND (
+                   (paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))
+                   OR chat_id = ?
+               )""",
+            (owner,),
         ).fetchall()]
 
 
 def get_alert_chats() -> list[int]:
+    # Same entitlement rule as get_active_chats, additionally gated on the
+    # alerts-enabled toggle. Includes the operator (no paid_until) so proactive
+    # whale/confluence/liquidation pushes actually reach it.
+    owner = config.OWNER_CHAT_ID or None
     with get_conn() as conn:
         return [r["chat_id"] for r in conn.execute(
             """SELECT chat_id FROM subscribers
-               WHERE active=1 AND alerts_enabled=1 AND paid_until IS NOT NULL
-                 AND datetime(paid_until) > datetime('now')"""
+               WHERE active=1 AND alerts_enabled=1 AND (
+                   (paid_until IS NOT NULL AND datetime(paid_until) > datetime('now'))
+                   OR chat_id = ?
+               )""",
+            (owner,),
         ).fetchall()]
 
 
@@ -599,6 +612,48 @@ def is_payment_used(tx_signature: str) -> bool:
             "SELECT 1 FROM used_payments WHERE tx_signature=?", (tx_signature,)
         ).fetchone()
     return row is not None
+
+
+# Spacing between consecutive chats' bound amounts, in USDC base units (6dp).
+# 20_000 = $0.02. This MUST stay strictly greater than the verifier's accept
+# window (core.solana_pay.PAYMENT_AMOUNT_WINDOW_UNITS = 10_000 = $0.01) so two
+# chats' acceptance windows never overlap and an over-pay within a chat's window
+# can't reach the next chat's slot (audit C1).
+PAYMENT_REF_STEP_UNITS = 20_000
+_PAYMENT_REF_MAX_SLOTS = 9_999
+
+
+def get_payment_reference(chat_id: int) -> int | None:
+    """The chat's bound payment amount in USDC base units (6dp), or None if unset."""
+    raw = get_state(f"pay_ref:{chat_id}")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def assign_payment_reference(chat_id: int) -> int:
+    """Assign (once) a unique, stable USDC amount for this chat — base price plus a
+    per-chat nonce on a $0.02 grid. The trailing cents identify which chat a
+    payment belongs to, binding a payment to its payer (audit C1).
+
+    Returns the full expected amount in base units. Idempotent: the same chat
+    always gets the same amount. NOTE: references are spaced $0.02 apart, so the
+    Nth chat pays ~$0.02*N above the base price; distinct slots wrap after 9999
+    chats (acceptable pre-public; revisit if the user base approaches either)."""
+    existing = get_payment_reference(chat_id)
+    if existing is not None:
+        return existing
+    seq_raw = get_state("pay_ref_seq")
+    try:
+        seq = int(seq_raw) + 1 if seq_raw is not None else 1
+    except (TypeError, ValueError):
+        seq = 1
+    set_state("pay_ref_seq", str(seq))
+    slot = (seq - 1) % _PAYMENT_REF_MAX_SLOTS + 1   # 1.._PAYMENT_REF_MAX_SLOTS
+    expected = round(config.PAYMENT_PRICE_USD * 1_000_000) + slot * PAYMENT_REF_STEP_UNITS
+    set_state(f"pay_ref:{chat_id}", str(expected))
+    return expected
 
 
 def mark_free_used(chat_id: int) -> None:
