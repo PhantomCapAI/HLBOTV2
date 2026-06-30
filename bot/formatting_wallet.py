@@ -426,6 +426,143 @@ def funding_spike_alert(asset: str, funding_rate: float, open_interest: float,
     )
 
 
+def _oi_regime(oi_up: bool, px_up) -> tuple[str, str]:
+    """(emoji, short label) for an OI/price regime — the compact digest version
+    of the long-form context block in oi_surge_alert."""
+    if px_up is None:
+        return ("🚀" if oi_up else "📉"), ("OI surge" if oi_up else "OI drop")
+    if oi_up and px_up:
+        return "📈", "🟢 new longs"
+    if oi_up and not px_up:
+        return "📉", "🔴 new shorts"
+    if not oi_up and px_up:
+        return "⚠️", "🟡 short covering"
+    return "⚠️", "🟡 longs unwinding"
+
+
+def oi_flow_digest(movers: list[dict]) -> str:
+    """One consolidated 'OI Flow' summary per cycle — top movers, one line each.
+
+    Each mover: {name, pct_change, curr_notional, mark_px, prev_px}. Replaces the
+    one-message-per-coin OI spam.
+    """
+    lines = []
+    for m in movers:
+        oi_up = m["pct_change"] > 0
+        prev_px = m.get("prev_px", 0.0)
+        px_up = (m["mark_px"] > prev_px) if prev_px > 0 else None
+        emoji, label = _oi_regime(oi_up, px_up)
+        oi_str = f"+{m['pct_change']:.0f}%" if oi_up else f"{m['pct_change']:.0f}%"
+        lines.append(
+            f"{emoji} <b>{m['name']}-PERP</b>  {oi_str} OI | "
+            f"${m['curr_notional']:,.0f} | {label}"
+        )
+    body = "\n".join(lines)
+    return (
+        f"🌊 <b>OI FLOW — top movers</b>\n"
+        f"{_DIVIDER}"
+        f"{body}\n"
+        f"{_DIVIDER}"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
+_HEALTH_STATE_LABELS = {
+    "hot_streak": "🔥 HOT STREAK",
+    "heating_up": "📈 HEATING UP",
+    "cooling_off": "📉 COOLING OFF",
+    "implosion_watch": "⚠️ IMPLOSION WATCH",
+    "self_imploding": "🚨 SELF-IMPLODING",
+}
+
+
+def wallet_health_digest(items: list[dict]) -> str:
+    """One consolidated 'Wallet Health' summary per cycle, grouped by state.
+
+    Each item: {state, codename, profile, rank, address, account_value,
+    exposure_total, open_upnl, book_leverage}. Carries the codename/tier identity
+    (not a bare rank + raw address).
+    """
+    order = ["self_imploding", "implosion_watch", "cooling_off", "hot_streak", "heating_up"]
+    by_state: dict[str, list[dict]] = {}
+    for it in items:
+        by_state.setdefault(it["state"], []).append(it)
+
+    blocks = []
+    for state in order:
+        group = by_state.get(state)
+        if not group:
+            continue
+        label = _HEALTH_STATE_LABELS.get(state, state.replace("_", " ").upper())
+        lines = [f"<b>{label}</b>"]
+        for it in group:
+            upnl = it["open_upnl"]
+            upnl_str = f"+${upnl:,.0f}" if upnl >= 0 else f"-${abs(upnl):,.0f}"
+            av = it["account_value"] or 0
+            upnl_pct = (upnl / av * 100) if av else 0.0
+            who = it.get("codename") or (it["address"][:6] + "..." + it["address"][-4:])
+            prof = f" · {it['profile']}" if it.get("profile") else ""
+            lines.append(
+                f"  🪪 {who}{prof}\n"
+                f"     uPnL {upnl_str} ({upnl_pct:+.0f}%) · {it['book_leverage']:.1f}x · "
+                f"<code>{it['address'][:6]}...{it['address'][-4:]}</code>"
+            )
+        blocks.append("\n".join(lines))
+
+    body = "\n\n".join(blocks)
+    return (
+        f"🩺 <b>WALLET HEALTH</b> | 🔒 <b>PRO</b>\n"
+        f"{_DIVIDER}"
+        f"{body}\n"
+        f"{_DIVIDER}"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
+def _confluence_line(g: dict) -> str:
+    side_emoji = "🟢" if g["side"] == "long" else "🔴"
+    direction = g["side"].upper()
+    return (
+        f"{side_emoji} <b>{g['coin']} {direction}</b> — {g['whale_count']} wallets | "
+        f"🧠 <b>{g['combined_smart']:+.1f}</b> | ${g['total_notional']:,.0f}"
+    )
+
+
+def confluence_digest(detailed: list[dict], brief: list[dict]) -> str:
+    """One consolidated 'Whale Confluence' summary per cycle.
+
+    `detailed` groups get the full per-wallet breakdown; `brief` groups are
+    one-liners. Each group: {coin, side, whale_count, combined_smart,
+    total_notional, whales:[{codename, address, notional, smart, rank}]}.
+    """
+    sections = []
+    for g in detailed:
+        whale_lines = "\n".join(
+            f"   🪪 {w.get('codename') or (w['address'][:6] + '...' + w['address'][-4:])}"
+            f" — ${w['notional']:,.0f} | 🧠 {w.get('smart', 0.0):+.1f} | #{w['rank']}"
+            for w in sorted(g["whales"], key=lambda x: x.get("smart", 0.0), reverse=True)
+        )
+        sections.append(f"{_confluence_line(g)}\n{whale_lines}")
+
+    block = "\n\n".join(sections)
+    if brief:
+        brief_lines = "\n".join(_confluence_line(g) for g in brief)
+        if block:
+            block += "\n\n"
+        block += f"<b>Also aligned:</b>\n{brief_lines}"
+
+    return (
+        f"🐋🐋 <b>WHALE CONFLUENCE — top setups</b>\n"
+        f"{_DIVIDER}"
+        f"{block}\n"
+        f"{_DIVIDER}"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
 def oi_surge_alert(asset: str, open_interest: float, prev_oi: float,
                    pct_change: float, mark_px: float, prev_px: float = 0.0) -> str:
     oi_up = pct_change > 0
