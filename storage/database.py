@@ -153,7 +153,7 @@ def init_db() -> None:
                 ON wallet_behavior_events(address, ts DESC);
             CREATE TABLE IF NOT EXISTS candidate_wallets (
                 address TEXT PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'suggested',  -- suggested|tracked|rejected|retired
+                status TEXT NOT NULL DEFAULT 'suggested',  -- suggested|proven|tracked|rejected|retired
                 smart_score REAL,
                 week_roi REAL,
                 month_roi REAL,
@@ -165,6 +165,24 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
         """)
+        # Per-cycle observation history for the proven-candidate promotion layer:
+        # one row each time a wallet clears the full discovery filter, so we can
+        # require sustained performance before recommending it.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                smart_score REAL,
+                week_roi REAL,
+                month_roi REAL,
+                leverage REAL,
+                account_value REAL,
+                observed_at TEXT NOT NULL
+            );
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cand_obs_addr ON candidate_observations(address)"
+        )
         try:
             conn.execute("ALTER TABLE position_snapshots ADD COLUMN liq_px REAL NOT NULL DEFAULT 0")
         except Exception:
@@ -905,6 +923,30 @@ def reset_candidate_negative_streak(address: str) -> None:
             "UPDATE candidate_wallets SET negative_streak=0, updated_at=datetime('now') WHERE address=?",
             (address.lower(),),
         )
+
+
+def record_candidate_observation(address: str, smart_score: float, week_roi: float,
+                                 month_roi: float, leverage: float,
+                                 account_value: float) -> None:
+    """Append one discovery-cycle observation for a wallet (proven-candidate
+    history). Called each cycle a wallet clears the full discovery filter."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO candidate_observations
+               (address, smart_score, week_roi, month_roi, leverage, account_value, observed_at)
+               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (address.lower(), smart_score, week_roi, month_roi, leverage, account_value),
+        )
+
+
+def get_candidate_observations(address: str) -> list[sqlite3.Row]:
+    """All observations for a wallet, oldest first."""
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM candidate_observations
+               WHERE address=? ORDER BY observed_at ASC, id ASC""",
+            (address.lower(),),
+        ).fetchall()
 
 
 # --------------------------- retention (W5) ---------------------------

@@ -179,8 +179,17 @@ CONFLUENCE_MIN_DISTINCT_STRONG = _i("CONFLUENCE_MIN_DISTINCT_STRONG", 1)
 # *suggests* (writes candidates + DMs the owner); you approve with /track <addr>.
 DISCOVERY_ENABLED = _b("DISCOVERY_ENABLED", True)
 DISCOVERY_INTERVAL_HOURS = _f("DISCOVERY_INTERVAL_HOURS", 8.0)
-# How deep into the leaderboard to scan (rows are account-value ranked).
-DISCOVERY_SCAN_TOP_N = _i("DISCOVERY_SCAN_TOP_N", 200)
+# How deep into the leaderboard to scan (rows are account-value ranked). The
+# leaderboard itself is a single cheap GET at any depth; the cost is the per-
+# wallet position fetch, which is paged across cycles (DISCOVERY_SCAN_PAGE_SIZE)
+# so a deep sweep never hammers the API. Deeper = surface strong mid-ranked
+# wallets that account-size ranking hides (e.g. #300 outperforming #10).
+DISCOVERY_SCAN_TOP_N = _i("DISCOVERY_SCAN_TOP_N", 500)
+# Leaderboard rows to process per cycle (bounds per-cycle clearinghouseState
+# fetches). The scan cursor advances each cycle and wraps, sweeping the full
+# DISCOVERY_SCAN_TOP_N depth over ceil(TOP_N / PAGE_SIZE) cycles. At the /info
+# min-interval (~0.75s) this is ~80 fetches/min, so 150 ≈ under ~2 min/cycle.
+DISCOVERY_SCAN_PAGE_SIZE = _i("DISCOVERY_SCAN_PAGE_SIZE", 150)
 # Ignore dust accounts — skill on a tiny book isn't a tracking signal.
 DISCOVERY_MIN_ACCOUNT_VALUE = _f("DISCOVERY_MIN_ACCOUNT_VALUE", 100_000)
 # Minimum smart_score for a wallet to be *suggested*.
@@ -201,6 +210,23 @@ DISCOVERY_AUTO_ADD_MAX_PER_RUN = _i("DISCOVERY_AUTO_ADD_MAX_PER_RUN", 3)
 # runs with negative week AND month ROI. Hand-picked watchlist entries are never
 # auto-retired.
 DISCOVERY_RETIRE_CYCLES = _i("DISCOVERY_RETIRE_CYCLES", 3)
+# Raw discovery suggestions are consolidated into ONE digest per cycle (ranked by
+# smart score, highest first), showing at most DISCOVERY_DIGEST_MAX wallets. The
+# rest are still written to the candidate store and reachable via /candidates +
+# /track. This is a lower-priority feed — the promotion pings are the real signal
+# — so it can be toggled off entirely.
+DISCOVERY_RAW_DIGEST_ENABLED = _b("DISCOVERY_RAW_DIGEST_ENABLED", True)
+DISCOVERY_DIGEST_MAX = _i("DISCOVERY_DIGEST_MAX", 10)
+
+# ---- Discovery: proven-candidate promotion (the real signal) ----
+# Discovery records a per-cycle observation for every wallet that clears the full
+# filter set. A candidate is only PROMOTED ("⭐ PROVEN — consider tracking") once
+# it has sustained performance: seen in >= MIN_CYCLES observations spanning >=
+# MIN_DAYS, week-ROI positive every time, and leverage under DISCOVERY_MAX_LEVERAGE
+# throughout. A wallet that spikes once and vanishes never gets promoted.
+DISCOVERY_PROVEN_ENABLED = _b("DISCOVERY_PROVEN_ENABLED", True)
+DISCOVERY_PROVEN_MIN_CYCLES = _i("DISCOVERY_PROVEN_MIN_CYCLES", 3)
+DISCOVERY_PROVEN_MIN_DAYS = _f("DISCOVERY_PROVEN_MIN_DAYS", 3.0)
 
 
 @dataclass
