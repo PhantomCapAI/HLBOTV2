@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from telegram import Update
 from telegram.ext import ContextTypes
+from core import identity
 
 import config
 from storage import database as db
@@ -363,20 +364,32 @@ async def candidates_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _owner_ok(update.effective_chat.id):
         await update.message.reply_text("🔒 Discovery management is operator-only.")
         return
-    rows = db.get_candidates_by_status("suggested")
-    if not rows:
+    proven = db.get_candidates_by_status("proven")
+    suggested = db.get_candidates_by_status("suggested")
+    if not proven and not suggested:
         await update.message.reply_text(
             "No discovery suggestions right now. The discovery job posts new ones as it finds them."
         )
         return
-    lines = ["🔎 <b>Discovery suggestions</b> (approve with /track)"]
-    for r in rows[:20]:
+
+    def _fmt(r) -> str:
         addr = r["address"]
-        lines.append(
-            f"• <code>{addr[:6]}…{addr[-4:]}</code> — 🧠 <b>{(r['smart_score'] or 0):+.1f}</b>"
+        who = identity.codename_for(addr)
+        return (
+            f"• 🪪 {who} — 🧠 <b>{(r['smart_score'] or 0):+.1f}</b>"
             f" | wk {(r['week_roi'] or 0)*100:+.1f}% mo {(r['month_roi'] or 0)*100:+.1f}%"
             f" | {(r['leverage'] or 0):.1f}x\n  <code>/track {addr}</code>"
         )
+
+    lines = []
+    if proven:
+        lines.append("⭐ <b>Proven — earned it</b> (approve with /track)")
+        lines += [_fmt(r) for r in proven[:20]]
+    if suggested:
+        if lines:
+            lines.append("")
+        lines.append("🔎 <b>Discovery suggestions</b> (approve with /track)")
+        lines += [_fmt(r) for r in suggested[:20]]
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -400,6 +413,32 @@ async def track_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db.set_candidate_status(addr, "tracked")
     await update.message.reply_text(
+        f"✅ Now tracking <code>{addr}</code>. It joins the active set on the next wallet cycle.",
+        parse_mode="HTML",
+    )
+
+
+async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the [✅ Track] inline button on a PROVEN promotion ping."""
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    chat_id = query.message.chat.id if query.message else update.effective_chat.id
+    if not _owner_ok(chat_id):
+        await query.answer("Only the operator can promote wallets.", show_alert=True)
+        return
+    data = query.data or ""
+    addr = data.split(":", 1)[1].strip().lower() if ":" in data else ""
+    cand = db.get_candidate(addr)
+    if cand is None:
+        await query.edit_message_text("That address isn't a discovery candidate anymore.")
+        return
+    if cand["status"] == "tracked":
+        await query.edit_message_text(f"Already tracking <code>{addr}</code>.", parse_mode="HTML")
+        return
+    db.set_candidate_status(addr, "tracked")
+    await query.edit_message_text(
         f"✅ Now tracking <code>{addr}</code>. It joins the active set on the next wallet cycle.",
         parse_mode="HTML",
     )

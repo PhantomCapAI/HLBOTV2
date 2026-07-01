@@ -367,6 +367,76 @@ def discovery_suggestion_alert(address: str, smart_score: float, week_roi: float
     )
 
 
+def _discovery_line(it: dict) -> str:
+    """Compact one-liner for a discovery candidate in the raw digest, with the
+    ready-to-tap /track command on its own line (full address needed to approve)."""
+    who = it.get("codename") or (it["address"][:6] + "..." + it["address"][-4:])
+    return (
+        f"🪪 {who} · 🧠 <b>{it['smart_score']:+.1f}</b> · "
+        f"wk {it['week_roi']*100:+.1f}% / mo {it['month_roi']*100:+.1f}% · "
+        f"{it['leverage']:.1f}x · ${it['account_value']:,.0f}\n"
+        f"   <code>/track {it['address']}</code>"
+    )
+
+
+def discovery_digest(suggested: list[dict], auto_added: list[dict] | None = None) -> str:
+    """One consolidated raw-discovery digest per cycle (ranked by smart score).
+
+    `suggested` = newly-qualified wallets awaiting /track approval; `auto_added` =
+    wallets silently promoted this cycle (only when DISCOVERY_AUTO_ADD is on).
+    Each item: {address, codename, smart_score, week_roi, month_roi, leverage,
+    account_value}.
+    """
+    sections = []
+    if suggested:
+        sections.append(
+            "Approve any with the shown <code>/track</code> command.\n\n"
+            + "\n".join(_discovery_line(it) for it in suggested)
+        )
+    if auto_added:
+        sections.append(
+            "<b>Auto-tracked this cycle:</b>\n"
+            + "\n".join(_discovery_line(it) for it in auto_added)
+        )
+    body = "\n\n".join(sections)
+    return (
+        f"🔎 <b>DISCOVERY — suggested wallets</b>\n"
+        f"{_DIVIDER}"
+        f"{body}\n"
+        f"{_DIVIDER}"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
+def proven_promotion_alert(address: str, codename: str, stats: dict) -> str:
+    """High-signal '⭐ PROVEN — consider tracking' ping: a candidate that earned it
+    over the observation window. `stats` from cycles.evaluate_proven():
+    times_seen, span_days, week_roi_min/max, month_roi_min/max, smart_min/max/last,
+    leverage_max, consistency_pct.
+    """
+    who = codename or (address[:6] + "..." + address[-4:])
+    return (
+        f"⭐ <b>PROVEN — consider tracking</b>\n"
+        f"{_DIVIDER}"
+        f"🪪 <b>{who}</b>\n"
+        f"🔑 <code>{address}</code>\n"
+        f"📊 Track record over <b>{stats['span_days']:.1f}d</b> — "
+        f"seen <b>{stats['times_seen']}x</b> in discovery\n"
+        f"🧠 Smart: <b>{stats['smart_last']:+.1f}</b> "
+        f"(range {stats['smart_min']:+.1f}…{stats['smart_max']:+.1f})\n"
+        f"📈 Week ROI range: <b>{stats['week_roi_min']*100:+.1f}%…{stats['week_roi_max']*100:+.1f}%</b>\n"
+        f"📈 Month ROI range: <b>{stats['month_roi_min']*100:+.1f}%…{stats['month_roi_max']*100:+.1f}%</b>\n"
+        f"⚖️ Peak leverage: <b>{stats['leverage_max']:.1f}x</b>\n"
+        f"✅ Week-positive & under leverage cap <b>{stats['consistency_pct']:.0f}%</b> of the window\n"
+        f"{_DIVIDER}"
+        f"<b>This one earned it</b> — sustained, not a one-cycle spike.\n"
+        f"Approve: <code>/track {address}</code>\n"
+        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"<i>Not financial advice. Data only.</i>"
+    )
+
+
 def liquidation_risk_alert(rank: int, address: str, coin: str, side: str,
                            notional_usd: float, liq_px: float, curr_px: float,
                            dist_pct: float, danger: bool = False) -> str:

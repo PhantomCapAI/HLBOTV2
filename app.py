@@ -15,7 +15,7 @@ from bot import telegram as tg
 from bot import handlers as h
 from services import cycles
 
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 log = setup_logging()
 
@@ -58,6 +58,8 @@ def main() -> None:
     app.add_handler(CommandHandler("candidates", h.candidates_cmd))
     app.add_handler(CommandHandler("track", h.track_cmd))
     app.add_handler(CommandHandler("help", h.help_cmd))
+    # Inline [✅ Track] button on PROVEN promotion pings.
+    app.add_handler(CallbackQueryHandler(h.track_callback, pattern=r"^track:"))
 
     jq = app.job_queue
     jq.run_repeating(cycles.wallet_job, interval=config.WALLET_SCAN_INTERVAL_SECONDS, first=10)

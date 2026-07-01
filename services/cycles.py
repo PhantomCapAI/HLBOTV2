@@ -9,7 +9,10 @@
 import asyncio
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
 from integrations import hyperliquid as hl
@@ -22,6 +25,7 @@ from services import digest as digest_svc
 from bot import telegram as tg
 from bot import formatting_wallet as fw
 from bot.formatting import format_setup
+from core import identity
 
 log = logging.getLogger(__name__)
 
@@ -262,29 +266,139 @@ async def _retire_stale_candidates(roi_by_addr: dict) -> None:
             db.reset_candidate_negative_streak(addr)
 
 
+def _parse_obs_dt(raw: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def evaluate_proven(observations: list, *, min_cycles: int, min_days: float,
+                    max_leverage: float) -> tuple[bool, dict]:
+    """Decide if a candidate's observation history proves sustained performance.
+
+    Proven requires: >= min_cycles observations spanning >= min_days, week ROI
+    positive in EVERY observation, and leverage <= max_leverage throughout. A
+    wallet that spiked once (or dipped negative / over-levered even once) fails.
+    Returns (is_proven, stats) where stats feeds the promotion ping.
+    """
+    obs = list(observations)
+    if len(obs) < min_cycles:
+        return False, {}
+    times = [t for t in (_parse_obs_dt(o["observed_at"]) for o in obs) if t]
+    if len(times) < min_cycles:
+        return False, {}
+    span_days = (max(times) - min(times)).total_seconds() / 86400.0
+    if span_days < min_days:
+        return False, {}
+
+    weeks = [float(o["week_roi"] or 0) for o in obs]
+    months = [float(o["month_roi"] or 0) for o in obs]
+    levs = [float(o["leverage"] or 0) for o in obs]
+    smarts = [float(o["smart_score"] or 0) for o in obs]
+    if not all(w > 0 for w in weeks):
+        return False, {}
+    if not all(lev <= max_leverage for lev in levs):
+        return False, {}
+
+    n = len(obs)
+    consistent = sum(1 for w, lev in zip(weeks, levs) if w > 0 and lev <= max_leverage)
+    stats = {
+        "times_seen": n,
+        "span_days": span_days,
+        "week_roi_min": min(weeks), "week_roi_max": max(weeks),
+        "month_roi_min": min(months), "month_roi_max": max(months),
+        "smart_min": min(smarts), "smart_max": max(smarts), "smart_last": smarts[-1],
+        "leverage_max": max(levs),
+        "consistency_pct": consistent / n * 100.0,
+    }
+    return True, stats
+
+
+def _track_button(address: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Track", callback_data=f"track:{address}")]]
+    )
+
+
+async def _maybe_promote_proven(address: str, codename: str) -> bool:
+    """Promote a candidate to PROVEN (one ping + Track button) once its history
+    earns it. Idempotent: a candidate already 'proven' won't re-ping."""
+    cand = db.get_candidate(address)
+    if cand and cand["status"] == "proven":
+        return False
+    ok, stats = evaluate_proven(
+        db.get_candidate_observations(address),
+        min_cycles=config.DISCOVERY_PROVEN_MIN_CYCLES,
+        min_days=config.DISCOVERY_PROVEN_MIN_DAYS,
+        max_leverage=config.DISCOVERY_MAX_LEVERAGE,
+    )
+    if not ok:
+        return False
+    db.set_candidate_status(address, "proven")
+    log.info("Discovery PROVEN: %s seen %sx over %.1fd",
+             address, stats["times_seen"], stats["span_days"])
+    await tg.notify_owner(
+        fw.proven_promotion_alert(address, codename, stats),
+        reply_markup=_track_button(address),
+    )
+    await asyncio.sleep(1)
+    return True
+
+
+def _discovery_page(effective: list[dict]) -> tuple[list[dict], int, int]:
+    """The slice of the leaderboard to run position-fetches on THIS cycle.
+
+    The leaderboard GET is cheap at any depth; the cost is the per-wallet fetch,
+    so we page it. A persisted cursor advances by DISCOVERY_SCAN_PAGE_SIZE each
+    cycle and wraps, sweeping the full depth over ceil(TOP_N / PAGE_SIZE) cycles.
+    """
+    total = len(effective)
+    if total == 0:
+        return [], 0, 0
+    page_size = max(1, config.DISCOVERY_SCAN_PAGE_SIZE)
+    try:
+        cursor = int(db.get_state("discovery_scan_cursor") or 0)
+    except (TypeError, ValueError):
+        cursor = 0
+    if cursor < 0 or cursor >= total:
+        cursor = 0
+    hi = min(cursor + page_size, total)
+    db.set_state("discovery_scan_cursor", str(hi if hi < total else 0))
+    return effective[cursor:hi], cursor, hi
+
+
 async def _discovery_cycle() -> None:
-    log.info("Starting discovery cycle (top_n=%s)...", config.DISCOVERY_SCAN_TOP_N)
+    log.info("Starting discovery cycle (top_n=%s, page=%s)...",
+             config.DISCOVERY_SCAN_TOP_N, config.DISCOVERY_SCAN_PAGE_SIZE)
     try:
         leaderboard = await hl.get_leaderboard(top_n=config.DISCOVERY_SCAN_TOP_N)
     except Exception as e:
         log.error("Discovery: leaderboard fetch failed: %s", e)
         return
 
+    effective = leaderboard[:config.DISCOVERY_SCAN_TOP_N]
     excluded = _discovery_excluded_addresses(leaderboard)
 
-    # Cheap pre-filter (no position fetch): not tracked, not algo, real size, and
-    # a multi-window track record — positive ROI on BOTH week AND month so a
-    # single lucky day can't qualify a wallet.
-    prelim: list[tuple] = []
+    # ROI over the FULL scanned depth is cheap (no fetch) and drives retirement.
     roi_by_addr: dict[str, tuple[float, float]] = {}
-    for row in leaderboard:
+    for row in effective:
         addr = (row.get("ethAddress") or "").lower()
-        if not addr:
+        if addr:
+            roi_by_addr[addr] = wt.window_roi(row)
+    await _retire_stale_candidates(roi_by_addr)
+
+    # Only the expensive position-fetch step is paged across cycles.
+    page_rows, lo, hi = _discovery_page(effective)
+
+    # Cheap pre-filter within this page (no fetch): not tracked/algo, real size,
+    # positive ROI on BOTH week AND month so a single lucky day can't qualify.
+    prelim: list[tuple] = []
+    for row in page_rows:
+        addr = (row.get("ethAddress") or "").lower()
+        if not addr or addr in excluded or db.is_algo(addr):
             continue
-        week_roi, month_roi = wt.window_roi(row)
-        roi_by_addr[addr] = (week_roi, month_roi)
-        if addr in excluded or db.is_algo(addr):
-            continue
+        week_roi, month_roi = roi_by_addr.get(addr, wt.window_roi(row))
         try:
             account_value = float(row.get("accountValue", 0) or 0)
         except (TypeError, ValueError):
@@ -295,17 +409,16 @@ async def _discovery_cycle() -> None:
             continue
         prelim.append((addr, week_roi, month_roi, account_value))
 
-    # Retirement runs off the full scanned set's ROI, before promotions.
-    await _retire_stale_candidates(roi_by_addr)
-
     if not prelim:
-        log.info("Discovery: no wallets passed the multi-window pre-filter.")
+        log.info("Discovery: page [%s:%s] had no wallets past the pre-filter.", lo, hi)
         return
 
-    # Fetch positions only for the small pre-filtered pool (leverage + MM checks).
+    # Fetch positions only for this page's pre-filtered pool (rate-limiter paced).
     raw_positions = await hl.fetch_all_positions([addr for addr, *_ in prelim])
 
-    suggested = auto_added = skipped_mm = skipped_lev = 0
+    suggested_items: list[dict] = []
+    auto_items: list[dict] = []
+    suggested = auto_added = skipped_mm = skipped_lev = proven = 0
     for addr, week_roi, month_roi, account_value in prelim:
         state = raw_positions.get(addr)
         if state is None:
@@ -329,10 +442,24 @@ async def _discovery_cycle() -> None:
         if smart < config.DISCOVERY_MIN_SMART_SCORE:
             continue
 
+        # Respect an owner's rejection/retirement — don't re-observe or resurface.
+        existing = db.get_candidate(addr)
+        if existing and existing["status"] in ("rejected", "retired"):
+            continue
+
         reason = (
             f"positive week ({week_roi*100:+.1f}%) & month ({month_roi*100:+.1f}%) ROI, "
             f"{leverage:.1f}x book, directional (not delta-neutral)"
         )
+        codename = identity.codename_for(addr)
+        item = {
+            "address": addr, "codename": codename, "smart_score": smart,
+            "week_roi": week_roi, "month_roi": month_roi,
+            "leverage": leverage, "account_value": account_value,
+        }
+        # Accumulate track record for the proven-candidate layer (no ping here).
+        db.record_candidate_observation(addr, smart, week_roi, month_roi, leverage, account_value)
+
         auto = (
             config.DISCOVERY_AUTO_ADD
             and smart >= config.DISCOVERY_AUTO_ADD_MIN_SMART
@@ -342,25 +469,34 @@ async def _discovery_cycle() -> None:
             db.upsert_suggested_candidate(addr, smart, week_roi, month_roi, leverage, account_value, reason)
             db.set_candidate_status(addr, "tracked")
             auto_added += 1
+            auto_items.append(item)
             log.info("Discovery AUTO-ADD: %s smart=%.1f", addr, smart)
-            await tg.notify_owner(fw.discovery_suggestion_alert(
-                address=addr, smart_score=smart, week_roi=week_roi, month_roi=month_roi,
-                leverage=leverage, account_value=account_value, reason=reason, auto_added=True))
-            await asyncio.sleep(1)
-        else:
-            is_new = db.upsert_suggested_candidate(
-                addr, smart, week_roi, month_roi, leverage, account_value, reason)
-            if is_new:
-                suggested += 1
-                log.info("Discovery SUGGEST: %s smart=%.1f", addr, smart)
-                await tg.notify_owner(fw.discovery_suggestion_alert(
-                    address=addr, smart_score=smart, week_roi=week_roi, month_roi=month_roi,
-                    leverage=leverage, account_value=account_value, reason=reason, auto_added=False))
-                await asyncio.sleep(1)
+            continue
+
+        is_new = db.upsert_suggested_candidate(
+            addr, smart, week_roi, month_roi, leverage, account_value, reason)
+
+        # The real signal: promote once the track record earns it.
+        promoted = False
+        if config.DISCOVERY_PROVEN_ENABLED:
+            promoted = await _maybe_promote_proven(addr, codename)
+            if promoted:
+                proven += 1
+        if is_new and not promoted:
+            suggested += 1
+            suggested_items.append(item)
+            log.info("Discovery SUGGEST: %s smart=%.1f", addr, smart)
+
+    # Raw suggestions → ONE lower-priority digest (optional), ranked by smart.
+    if config.DISCOVERY_RAW_DIGEST_ENABLED and (suggested_items or auto_items):
+        suggested_items.sort(key=lambda it: it["smart_score"], reverse=True)
+        await tg.notify_owner(fw.discovery_digest(
+            suggested_items[:config.DISCOVERY_DIGEST_MAX], auto_items))
 
     log.info(
-        "Discovery cycle complete: %s suggested, %s auto-added, %s MM-skipped, %s over-leverage.",
-        suggested, auto_added, skipped_mm, skipped_lev,
+        "Discovery cycle complete [rows %s:%s]: %s suggested, %s proven, %s auto-added, "
+        "%s MM-skipped, %s over-leverage.",
+        lo, hi, suggested, proven, auto_added, skipped_mm, skipped_lev,
     )
 
 

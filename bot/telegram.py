@@ -40,7 +40,7 @@ async def _retry(call, attempts: int = 3):
 
 
 async def send_to_chat(chat_id: int, text: str = None, photo: bytes = None,
-                       caption: str = None):
+                       caption: str = None, reply_markup=None):
     """Send a message to one chat, return the Message object."""
     bot = _app.bot
     if photo is not None:
@@ -49,6 +49,7 @@ async def send_to_chat(chat_id: int, text: str = None, photo: bytes = None,
             photo=InputFile(io.BytesIO(photo), filename="alert.png"),
             caption=caption or "",
             parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
         ))
     else:
         return await _retry(lambda: bot.send_message(
@@ -56,6 +57,7 @@ async def send_to_chat(chat_id: int, text: str = None, photo: bytes = None,
             text=text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
+            reply_markup=reply_markup,
         ))
 
 
@@ -81,7 +83,7 @@ async def broadcast(text: str = None, photo: bytes = None, caption: str = None,
     return sent_any
 
 
-async def notify_owner(text: str) -> bool:
+async def notify_owner(text: str, reply_markup=None) -> bool:
     """Send an operator-only message.
 
     Prefers OWNER_CHAT_ID when configured; otherwise falls back to the active
@@ -91,11 +93,21 @@ async def notify_owner(text: str) -> bool:
     owner = config.OWNER_CHAT_ID
     if owner:
         try:
-            await send_to_chat(owner, text=text)
+            await send_to_chat(owner, text=text, reply_markup=reply_markup)
             return True
         except Exception as e:
             log.warning("notify_owner to %s failed: %s", owner, e)
             return False
+    if reply_markup is not None:
+        # No single owner target: send the button message to each active chat.
+        sent_any = False
+        for chat_id in db.get_alert_chats():
+            try:
+                await send_to_chat(chat_id, text=text, reply_markup=reply_markup)
+                sent_any = True
+            except Exception as e:
+                log.warning("notify_owner broadcast to %s failed: %s", chat_id, e)
+        return sent_any
     return await broadcast(text=text)
 
 
