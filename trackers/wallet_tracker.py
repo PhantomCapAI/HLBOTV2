@@ -33,14 +33,15 @@ from bot.formatting_wallet import (
     whale_stress_watch_alert,
     whale_reactivation_alert,
     wallet_performance_alert,
-    confluence_alert,
-    confluence_teaser,
+    confluence_digest,
     liquidation_risk_alert,
     funding_spike_alert,
     oi_surge_alert,
+    oi_flow_digest,
+    wallet_health_digest,
     with_identity,
 )
-from bot.charts import generate_whale_chart, generate_confluence_chart
+from bot.charts import generate_whale_chart
 from bot.telegram import send_alert, send_photo_alert
 from services import wallet_profile as wp
 from core import identity
@@ -399,7 +400,14 @@ def classify_wallet_performance(current: dict, previous) -> tuple[str, str]:
     return "stable", "No major PnL health change."
 
 
-async def check_wallet_performance_health(
+# Severity order for the wallet-health digest (worst first).
+_HEALTH_SEVERITY = {
+    "self_imploding": 0, "implosion_watch": 1, "cooling_off": 2,
+    "hot_streak": 3, "heating_up": 4,
+}
+
+
+def collect_wallet_health_flag(
     row: dict,
     address: str,
     rank,
@@ -407,7 +415,14 @@ async def check_wallet_performance_health(
     account_value: float,
     seed_mode: bool,
     added_under_stress: bool = False,
-) -> None:
+) -> dict | None:
+    """Classify + persist a wallet's health snapshot; return a digest item when
+    it's alert-worthy and not on cooldown, else None.
+
+    The snapshot is ALWAYS saved (history stays continuous); whether it actually
+    appears in this cycle's digest is decided by the caller (size cap). Nothing is
+    sent here — sends are consolidated into one digest per cycle.
+    """
     current = wallet_performance_snapshot(account_value, positions)
     previous = get_latest_wallet_performance(address)
     state, reason = classify_wallet_performance(current, previous)
@@ -421,32 +436,48 @@ async def check_wallet_performance_health(
     )
 
     if seed_mode or previous is None:
-        return
+        return None
     if state not in {"hot_streak", "cooling_off", "implosion_watch", "self_imploding"}:
-        return
+        return None
 
     alert_key = f"wallet_perf:{state}:{address}"
     legacy_prefix = f"{alert_key}:"
     if alert_already_sent("wallet_performance", alert_key, cooldown_minutes=WALLET_PERFORMANCE_COOLDOWN_MINUTES):
-        return
+        return None
     if get_recent_alerts_by_prefix("wallet_performance", legacy_prefix, cooldown_minutes=WALLET_PERFORMANCE_COOLDOWN_MINUTES):
-        return
+        return None
 
-    msg = wallet_performance_alert(
-        rank=rank,
-        address=address,
-        state=state,
-        account_value=current["account_value"],
-        exposure_total=current["exposure_total"],
-        open_upnl=current["open_upnl"],
-        negative_upnl=current["negative_upnl"],
-        book_leverage=current["book_leverage"],
-        reason=reason,
-    )
-    sent = await safe_send(msg, paid_only=True)
-    if sent:
-        record_alert("wallet_performance", alert_key)
-        log.info("Wallet performance [%s]: %s %s", state, address[:10], reason)
+    return {
+        "state": state,
+        "reason": reason,
+        "rank": rank,
+        "address": address,
+        "codename": identity.codename_for(address),
+        "profile": wp.profile_line(address),
+        "account_value": current["account_value"],
+        "exposure_total": current["exposure_total"],
+        "open_upnl": current["open_upnl"],
+        "negative_upnl": current["negative_upnl"],
+        "book_leverage": current["book_leverage"],
+        "alert_key": alert_key,
+    }
+
+
+async def send_wallet_health_digest(flags: list[dict]) -> None:
+    """Consolidate this cycle's wallet-health flags into ONE digest (PRO).
+
+    Worst states first, capped at WALLET_HEALTH_DIGEST_MAX wallets; only the
+    included ones burn their per-state cooldown (the rest can surface next cycle).
+    """
+    if not flags:
+        return
+    flags.sort(key=lambda f: (_HEALTH_SEVERITY.get(f["state"], 9), -abs(f["open_upnl"])))
+    included = flags[:config.WALLET_HEALTH_DIGEST_MAX]
+
+    if await safe_send(wallet_health_digest(included), paid_only=True):
+        for f in included:
+            record_alert("wallet_performance", f["alert_key"])
+        log.info("Wallet health digest: %s wallets (%s shown)", len(flags), len(included))
         await asyncio.sleep(3)
 
 
@@ -505,6 +536,7 @@ async def check_whale_positions(
 ) -> None:
     mark_prices = {a["name"]: a["mark_px"] for a in assets}
     alerts_sent_this_cycle = 0
+    health_flags: list[dict] = []
 
     for fallback_rank, row in enumerate(leaderboard, start=1):
         address = row.get("ethAddress")
@@ -555,7 +587,7 @@ async def check_whale_positions(
             flipped_coins = {e["coin"] for e in diff_events if e["type"] == "flip"}
 
             save_positions(address, current_positions)
-            await check_wallet_performance_health(
+            health_flag = collect_wallet_health_flag(
                 row=row,
                 address=address,
                 rank=rank,
@@ -564,6 +596,8 @@ async def check_whale_positions(
                 seed_mode=seed_mode,
                 added_under_stress=stress_add,
             )
+            if health_flag:
+                health_flags.append(health_flag)
 
             # Persistent identity + behavioral profile (consumes the snapshot
             # just written above). Runs in seed too, to baseline open-lots.
@@ -864,12 +898,24 @@ async def check_whale_positions(
             log.error("Whale scan error for %s: %s", address[:10] if address else "?", e, exc_info=True)
             continue
 
+    # One consolidated wallet-health digest per cycle (not one ping per wallet).
+    await send_wallet_health_digest(health_flags)
+
+
+def confluence_group_passes_quality(combined_smart: float, whales: list[dict]) -> bool:
+    """Quality floor for a confluence group: a real combined edge AND enough
+    genuinely-strong individual wallets (kills 'same low/negative pair repeating
+    across many coins' noise)."""
+    if combined_smart < config.CONFLUENCE_MIN_COMBINED_SMART:
+        return False
+    strong = sum(1 for w in whales if w.get("smart", 0.0) >= config.CONFLUENCE_STRONG_WALLET_SMART)
+    return strong >= config.CONFLUENCE_MIN_DISTINCT_STRONG
+
 
 async def check_whale_confluence(leaderboard: list[dict], assets: list[dict], seed_mode: bool) -> None:
     if seed_mode:
         return
 
-    mark_prices = {a["name"]: a["mark_px"] for a in assets}
     # Exclude algos from confluence — only human wallets count
     top50 = {
         row["ethAddress"]: rank
@@ -891,47 +937,46 @@ async def check_whale_confluence(leaderboard: list[dict], assets: list[dict], se
             "smart": smart_scores.get((row["address"] or "").lower(), 0.0),
         })
 
-    # Rank confluence groups by combined smart_score (skill), not combined notional.
-    ranked_groups = sorted(
-        ((key, whales) for key, whales in groups.items() if len(whales) >= 2),
-        key=lambda kw: sum(w["smart"] for w in kw[1]),
-        reverse=True,
-    )
-
-    for key, whales in ranked_groups:
+    # Build candidate groups (>= 2 aligned whales), apply the quality floor, and
+    # rank by combined smart score (skill), not combined notional.
+    candidates = []
+    for key, whales in groups.items():
+        if len(whales) < 2:
+            continue
         coin, side = key.split(":", 1)
-        total_notional = sum(w["notional"] for w in whales)
         combined_smart = round(sum(w["smart"] for w in whales), 1)
-        whale_count = len(whales)
-        alert_key = f"confluence:{coin}:{side}:{whale_count}"
-
-        semantic_prefix = f"confluence:{coin}:{side}:"
+        if not confluence_group_passes_quality(combined_smart, whales):
+            continue
+        # Per-(coin,side) cooldown so the same confluence isn't repeated each cycle.
         if get_recent_alerts_by_prefix(
-            "confluence",
-            semantic_prefix,
+            "confluence", f"confluence:{coin}:{side}:",
             cooldown_minutes=CONFLUENCE_SEMANTIC_COOLDOWN_MINUTES,
         ):
             continue
+        candidates.append({
+            "coin": coin, "side": side, "whale_count": len(whales),
+            "combined_smart": combined_smart,
+            "total_notional": sum(w["notional"] for w in whales),
+            "whales": whales,
+            "alert_key": f"confluence:{coin}:{side}:{len(whales)}",
+        })
 
-        if alert_already_sent("confluence", alert_key, cooldown_minutes=120):
-            continue
+    if not candidates:
+        return
 
-        # Full pro alert — chart + wallet details
-        caption = confluence_alert(
-            coin=coin, side=side, whale_count=whale_count,
-            total_notional=total_notional, whales=whales,
-            premium=whale_count >= 3, combined_smart_score=combined_smart,
-        )
-        chart = await generate_confluence_chart(
-            coin=coin, side=side, whales=whales,
-            current_px=mark_prices.get(coin, 0.0),
-        )
-        sent = await safe_send_photo(chart, caption, paid_only=True) if chart else await safe_send(caption, paid_only=True)
+    candidates.sort(key=lambda g: g["combined_smart"], reverse=True)
+    # Consolidate into ONE digest: strongest few get the full wallet breakdown,
+    # the rest are one-liners; everything past DIGEST_MAX is dropped.
+    included = candidates[:config.CONFLUENCE_DIGEST_MAX]
+    detailed = included[:config.CONFLUENCE_DIGEST_DETAIL]
+    brief = included[config.CONFLUENCE_DIGEST_DETAIL:]
 
-        if sent:
-            record_alert("confluence", alert_key)
-            log.info(f"Confluence [PRO{' +teaser' if whale_count == 2 else ''}]: {whale_count} whales {coin} {side} ${total_notional:,.0f}")
-            await asyncio.sleep(3)
+    if await safe_send(confluence_digest(detailed, brief), paid_only=True):
+        for g in included:
+            record_alert("confluence", g["alert_key"])
+        log.info("Confluence digest [PRO]: %s groups (%s detailed, %s brief)",
+                 len(included), len(detailed), len(brief))
+        await asyncio.sleep(3)
 
 
 async def check_liquidation_risk(
@@ -1022,7 +1067,8 @@ async def check_funding_spikes(assets: list[dict], seed_mode: bool) -> None:
 
         msg = funding_spike_alert(
             asset=asset["name"], funding_rate=curr_rate,
-            open_interest=asset["open_interest"],
+            # OI is in coins; show USD notional (coins * markPx), not raw units.
+            open_interest=_oi_notional(asset["open_interest"], asset["mark_px"]),
             mark_px=asset["mark_px"], prev_rate=prev_rate,
         )
         sent = await safe_send(msg)
@@ -1032,41 +1078,85 @@ async def check_funding_spikes(assets: list[dict], seed_mode: bool) -> None:
             await asyncio.sleep(3)
 
 
-async def check_oi_surges(assets: list[dict], seed_mode: bool) -> None:
-    if seed_mode:
-        return
-    for asset in assets:
-        curr_oi = asset["open_interest"]
+def _oi_notional(oi_units: float, mark_px: float) -> float:
+    """USD notional of an OI reading. HL reports openInterest in base-asset units
+    (coins), so notional = coins * markPx — NOT the raw coin count."""
+    return float(oi_units) * float(mark_px)
 
-        # Skip tiny markets
-        if curr_oi < config.MIN_OI_FOR_SURGE:
+
+def collect_oi_surge_candidates(assets: list[dict]) -> list[dict]:
+    """Eligible OI signals for this cycle, sorted by |% change| descending.
+
+    Units fix: OI is in coins; floors and the displayed figure use USD notional
+    (coins * markPx). The %-change is computed on coin units (price-independent),
+    which is the actual change in open interest. Markets with no valid ~1h-ago
+    baseline are skipped (never fire on first observation), and absurd notionals
+    (bad data) are dropped.
+    """
+    candidates: list[dict] = []
+    for asset in assets:
+        curr_oi = float(asset["open_interest"])
+        mark_px = float(asset["mark_px"])
+        if mark_px <= 0 or curr_oi <= 0:
             continue
 
-        # Compare against 1-hour-ago snapshot — not last scan
+        curr_notional = _oi_notional(curr_oi, mark_px)
+        # Skip thin markets (USD-notional floor) and bad-data spikes.
+        if curr_notional < config.MIN_OI_FOR_SURGE:
+            continue
+        if curr_notional > config.OI_NOTIONAL_SANITY_MAX_USD:
+            log.warning("OI sanity drop: %s notional $%s exceeds ceiling",
+                        asset["name"], f"{curr_notional:,.0f}")
+            continue
+
+        # Compare against a ~1-hour-ago snapshot — never fire without a baseline.
         prev = get_funding_ago(asset["name"], minutes=60)
         if prev is None:
             continue
-
-        prev_oi = prev["open_interest"]
-        prev_px = prev["mark_px"]
-        if prev_oi == 0:
+        prev_oi = float(prev["open_interest"])
+        prev_px = float(prev["mark_px"])
+        if prev_oi <= 0:
             continue
 
         pct_change = ((curr_oi - prev_oi) / prev_oi) * 100
         if abs(pct_change) < config.OI_SURGE_PCT_THRESHOLD:
             continue
 
-        alert_key = f"oi_surge:{asset['name']}"
-        if alert_already_sent("oi_surge", alert_key, cooldown_minutes=240):
-            continue
+        candidates.append({
+            "name": asset["name"],
+            "curr_notional": curr_notional,
+            "prev_oi": prev_oi,
+            "prev_px": prev_px,
+            "pct_change": pct_change,
+            "mark_px": mark_px,
+        })
 
-        msg = oi_surge_alert(
-            asset=asset["name"], open_interest=curr_oi,
-            prev_oi=prev_oi, pct_change=pct_change,
-            mark_px=asset["mark_px"], prev_px=prev_px,
-        )
-        sent = await safe_send(msg)
-        if sent:
-            record_alert("oi_surge", alert_key)
-            log.info(f"OI signal: {asset['name']} {pct_change:+.1f}% | px {'up' if asset['mark_px'] > prev_px else 'down'}")
-            await asyncio.sleep(3)
+    candidates.sort(key=lambda c: abs(c["pct_change"]), reverse=True)
+    return candidates
+
+
+async def check_oi_surges(assets: list[dict], seed_mode: bool) -> None:
+    if seed_mode:
+        return
+
+    # Consolidate into ONE 'OI Flow' digest: top movers by magnitude, after the
+    # units/baseline/sanity fixes and per-coin cooldown.
+    movers = []
+    for c in collect_oi_surge_candidates(assets):
+        if len(movers) >= config.OI_DIGEST_MAX:
+            break
+        alert_key = f"oi_surge:{c['name']}"
+        if alert_already_sent("oi_surge", alert_key,
+                              cooldown_minutes=config.OI_SURGE_COOLDOWN_MINUTES):
+            continue
+        movers.append(c)
+
+    if not movers:
+        return
+
+    if await safe_send(oi_flow_digest(movers)):
+        for c in movers:
+            record_alert("oi_surge", f"oi_surge:{c['name']}")
+        log.info("OI Flow digest: %s movers (top %s)",
+                 len(movers), ", ".join(m["name"] for m in movers[:3]))
+        await asyncio.sleep(3)

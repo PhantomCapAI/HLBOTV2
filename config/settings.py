@@ -82,11 +82,26 @@ IDLE_WHEN_OFF = _b("IDLE_WHEN_OFF", True)
 # ---- Wallet thresholds (from repo config.py) ----
 WHALE_POSITION_THRESHOLD_USD = _f("WHALE_POSITION_THRESHOLD_USD", 500_000)
 FUNDING_RATE_SPIKE_THRESHOLD = _f("FUNDING_RATE_SPIKE_THRESHOLD", 0.0001)
-OI_SURGE_PCT_THRESHOLD = _f("OI_SURGE_PCT_THRESHOLD", 15.0)
+# OI signal noise controls. OI on HL is reported in *base-asset units* (coins);
+# everywhere we show or floor it we convert to USD notional (coins * markPx).
+OI_SURGE_PCT_THRESHOLD = _f("OI_SURGE_PCT_THRESHOLD", 40.0)
+# Minimum OI *USD notional* (coins * markPx) for a market to be eligible — skips
+# thin markets whose % swings are meaningless.
 MIN_OI_FOR_SURGE = _f("MIN_OI_FOR_SURGE", 50_000_000)
+# Per-coin cooldown; OI movers are consolidated into ONE 'OI Flow' digest per
+# cycle showing at most OI_DIGEST_MAX top movers (by |%change|).
+OI_SURGE_COOLDOWN_MINUTES = _i("OI_SURGE_COOLDOWN_MINUTES", 240)
+OI_DIGEST_MAX = _i("OI_DIGEST_MAX", 6)
+# Hard ceiling on OI USD notional — anything above this is a data glitch (total
+# crypto OI across all venues is well under $100B), so drop it rather than alert.
+OI_NOTIONAL_SANITY_MAX_USD = _f("OI_NOTIONAL_SANITY_MAX_USD", 100_000_000_000)
 LIQ_PROXIMITY_THRESHOLD_PCT = _f("LIQ_PROXIMITY_THRESHOLD_PCT", 10.0)
 LIQ_PROXIMITY_DANGER_PCT = _f("LIQ_PROXIMITY_DANGER_PCT", 5.0)
 MIN_NOTIONAL_FOR_LIQ_ALERT = _f("MIN_NOTIONAL_FOR_LIQ_ALERT", 5_000_000)
+# Wallet-health (HOT STREAK / SELF-IMPLODING / etc.) flags are consolidated into
+# ONE 'Wallet Health' digest per cycle listing at most WALLET_HEALTH_DIGEST_MAX
+# wallets. Per-wallet/per-state cooldown is WALLET_PERFORMANCE_COOLDOWN_MINUTES.
+WALLET_HEALTH_DIGEST_MAX = _i("WALLET_HEALTH_DIGEST_MAX", 8)
 
 # ---- Pay-to-activate (Solana USDC) ----
 # Every /start re-charges $3.00 USDC on Solana ($1/day); paying via /paid <tx>
@@ -141,6 +156,22 @@ WHALE_TINY_BASE_PCT = _f("WHALE_TINY_BASE_PCT", 5.0)       # ...or below this % 
 CORRELATION_MIN_SCORE = _f("CORRELATION_MIN_SCORE", 60.0)
 CORRELATION_MIN_WHALES = _i("CORRELATION_MIN_WHALES", 2)
 CORRELATION_COOLDOWN_MINUTES = _i("CORRELATION_COOLDOWN_MINUTES", 180)
+
+# ---- Whale-confluence digest + quality floor ----
+# Confluence groups are consolidated into ONE 'Whale Confluence' digest per cycle
+# instead of one message per coin. Quality floor first, then rank by combined
+# smart score: the top CONFLUENCE_DIGEST_DETAIL get the full per-wallet breakdown,
+# the next up to CONFLUENCE_DIGEST_MAX are one-liners, the rest are dropped.
+CONFLUENCE_DIGEST_MAX = _i("CONFLUENCE_DIGEST_MAX", 8)
+CONFLUENCE_DIGEST_DETAIL = _i("CONFLUENCE_DIGEST_DETAIL", 3)
+# Drop a group whose combined smart score is below this floor (kills the
+# "+13.9, same two wallets, one negative" noise).
+CONFLUENCE_MIN_COMBINED_SMART = _f("CONFLUENCE_MIN_COMBINED_SMART", 15.0)
+# A wallet counts as "strong" at/above this individual smart score; a group must
+# contain at least CONFLUENCE_MIN_DISTINCT_STRONG of them (filters the same low/
+# negative-score pair repeating across many coins).
+CONFLUENCE_STRONG_WALLET_SMART = _f("CONFLUENCE_STRONG_WALLET_SMART", 10.0)
+CONFLUENCE_MIN_DISTINCT_STRONG = _i("CONFLUENCE_MIN_DISTINCT_STRONG", 1)
 
 # ---- Automated wallet discovery (skill-ranked promotion) ----
 # A slow background job scores leaderboard wallets by smart_score and suggests

@@ -28,6 +28,14 @@ log = logging.getLogger(__name__)
 _last_setups: list[dict] = []
 _last_confluence_snapshot: str | None = None
 
+# Process-level cold-start guards. The persistent `wallet_seeded` DB flag survives
+# restarts/redeploys, so on its own it does NOT stop the first cycle after a
+# restart from flooding (every subsystem diffs against a stale/empty baseline at
+# once). These reset to True on every process start; the first wallet/coin cycle
+# after start runs in seed mode (refresh baselines silently, no broadcasts).
+_wallet_cold_start_pending = True
+_coin_cold_start_pending = True
+
 
 def last_confluence_snapshot() -> str | None:
     return _last_confluence_snapshot
@@ -161,9 +169,9 @@ def _format_confluence(m: dict) -> str:
     return head + format_setup(m["setup"])
 
 
-async def _coin_cycle() -> None:
+async def _coin_cycle(seed_mode: bool = False) -> None:
     global _last_setups, _last_confluence_snapshot
-    log.info("Starting coin-scan cycle...")
+    log.info("Starting %s cycle...", "coin-seed" if seed_mode else "coin-scan")
     try:
         setups = await coin_scan()
         _last_setups = setups
@@ -173,6 +181,11 @@ async def _coin_cycle() -> None:
             inner = (s.get("setups") or [{}])[0]
             direction = (inner.get("direction") or "long").lower()
             key = f"coin:{s.get('coin')}:{direction}"
+            if seed_mode:
+                # Cold start: record the already-qualifying setups so they don't
+                # all fire at once on the first scan; new/changed ones alert later.
+                db.record_alert("coin", key)
+                continue
             await alerts_svc.maybe_send("coin", key, format_setup(s), cooldown_minutes=240)
 
         # Dedicated correlation pass: the normal shortlist is often builder-dex
@@ -192,12 +205,16 @@ async def _coin_cycle() -> None:
             _last_confluence_snapshot = "\n\n".join(_format_confluence(m) for m in matches)
             for m in matches:
                 key = f"corr:{m['coin']}:{m['side']}"
+                if seed_mode:
+                    db.record_alert("correlation", key)
+                    continue
                 await alerts_svc.maybe_send(
                     "correlation", key, _format_confluence(m),
                     cooldown_minutes=config.CORRELATION_COOLDOWN_MINUTES,
                     pin=True,
                 )
-        log.info("Coin-scan cycle complete (%s setups, %s confluence).", len(setups), len(matches))
+        log.info("%s cycle complete (%s setups, %s confluence).",
+                 "Coin-seed" if seed_mode else "Coin-scan", len(setups), len(matches))
     except Exception as e:
         log.error("Coin cycle error: %s", e, exc_info=True)
 
@@ -358,15 +375,29 @@ async def wallet_seed_job(context) -> None:
 
 
 async def wallet_job(context) -> None:
+    global _wallet_cold_start_pending
     if not _should_run():
         return
     if db.get_state("wallet_seeded") != "1":
         return  # wait until the one-off seed has run
+    if _wallet_cold_start_pending:
+        # First wallet cycle this process: refresh baselines silently so a restart
+        # doesn't re-diff against stale state and dump a flood of alerts.
+        _wallet_cold_start_pending = False
+        log.info("Cold start: seeding wallet baselines silently (no alerts this cycle).")
+        await _wallet_cycle(seed_mode=True)
+        return
     await _wallet_cycle(seed_mode=False)
 
 
 async def coin_job(context) -> None:
+    global _coin_cold_start_pending
     if not _should_run():
+        return
+    if _coin_cold_start_pending:
+        _coin_cold_start_pending = False
+        log.info("Cold start: seeding coin-scan baseline silently (no alerts this cycle).")
+        await _coin_cycle(seed_mode=True)
         return
     await _coin_cycle()
 
