@@ -36,10 +36,11 @@ _PAID_REASONS = {
     "bad_block_time": "That transaction's timestamp looks off — please retry.",
     "no_usdc_to_recipient": "I don't see a USDC payment to our address in that transaction.",
     "unexpected_token_decimals": "That token doesn't look like USDC.",
-    "amount_too_low": f"That payment is below the required ${config.PAYMENT_PRICE_USD:.2f} USDC.",
+    "amount_too_low": "That payment is below the price for the plan you chose.",
     "amount_mismatch": (
-        "That payment's amount doesn't match your account's unique amount. "
-        "Send the EXACT amount shown by /start (the final digits identify you)."
+        "That payment's amount doesn't match your account's unique amount for "
+        "that plan. Send the EXACT amount shown by /start (the final digits "
+        "identify you), and use the /paid command for the plan you paid for."
     ),
 }
 
@@ -91,9 +92,9 @@ def _activate_entitled(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome + how-to-pay. /start never activates for free — every /start
-    routes through payment. Paying opens access for up to PAYMENT_VALIDITY_DAYS
-    (~$1/day); after that the user repays. Background alerts + value commands are
-    driven by the paid window.
+    routes through payment. Paying opens access for the chosen plan's duration
+    (1 week or 1 month); after that the user repays. Background alerts + value
+    commands are driven by the paid window.
 
     Renders exactly one of two things, never both (audit H1):
       * active chats (incl. the operator) -> the active confirmation only;
@@ -122,33 +123,58 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     intro = (
         "👋 <b>HL Intel — pay to use.</b>\n\n"
-        f"A pass opens the scanner (value commands + proactive alerts) for up to "
-        f"<b>{config.PAYMENT_VALIDITY_DAYS} days</b> — about $1/day.\n\n"
+        "A pass opens the scanner (value commands + proactive alerts). Pick a "
+        "plan below.\n\n"
     )
     await update.message.reply_text(intro + paywall_message(chat_id), parse_mode="HTML")
 
 
+def _parse_plan_and_tx(args: list[str]) -> tuple[str | None, str | None]:
+    """Split /paid args into (plan, tx_signature), tolerant of order.
+
+    A known plan keyword ("week"/"month", case-insensitive) is the plan; the
+    other argument is the transaction signature. Either may be missing → None."""
+    plan = None
+    tx = None
+    for raw in args or []:
+        token = raw.strip()
+        if token.lower() in config.PAYMENT_PLANS:
+            plan = token.lower()
+        elif token:
+            tx = token
+    return plan, tx
+
+
+def _paid_usage() -> str:
+    plans = ", ".join(
+        f"<code>{p}</code> (${config.PAYMENT_PLANS[p]['price_usd']:.2f}, "
+        f"{config.PAYMENT_PLANS[p]['days']}d)"
+        for p in config.PAYMENT_PLAN_ORDER
+    )
+    return (
+        "Usage: <code>/paid &lt;plan&gt; &lt;tx_signature&gt;</code>\n"
+        f"Plans: {plans}.\n"
+        "Pay the exact amount shown by /start for your plan, then send the "
+        "transaction signature with the matching plan."
+    )
+
+
 async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Redeem a Solana USDC payment: /paid <tx_signature>."""
+    """Redeem a Solana USDC payment: /paid <plan> <tx_signature>."""
     chat_id = update.effective_chat.id
-    # The chat's bound, unique amount — verification requires an exact match (C1).
-    expected = db.assign_payment_reference(chat_id)
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: <code>/paid &lt;tx_signature&gt;</code>\n"
-            f"Pay <b>${expected / 1_000_000:.4f} USDC</b> (Solana — rounding up by "
-            "under a cent is fine) to the address from /start, then send the "
-            "transaction signature here.",
-            parse_mode="HTML",
-        )
+    plan, tx = _parse_plan_and_tx(context.args)
+    if plan is None or tx is None:
+        await update.message.reply_text(_paid_usage(), parse_mode="HTML")
         return
 
-    tx = context.args[0].strip()
     if db.is_payment_used(tx):
         await update.message.reply_text(
             "⚠️ That transaction has already been redeemed.")
         return
 
+    # The chat's bound, unique amount for THIS plan — verification requires an
+    # exact match, and the plan sets the whole-dollar base (audit C1).
+    expected = db.payment_reference(chat_id, plan)
     await update.message.reply_text("⏳ Verifying your payment on Solana...")
     result = await verify_usdc_payment(tx, expected_units=expected)
     if not result.get("ok"):
@@ -158,13 +184,29 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Success: burn the tx (replay protection), grant entitlement, activate.
     db.mark_payment_used(tx, chat_id)
-    paid_until = datetime.now(timezone.utc) + timedelta(days=config.PAYMENT_VALIDITY_DAYS)
+    # Refill rather than reset: extend from the later of now and any remaining
+    # window, so buying a shorter plan while a longer one is live never shortens
+    # access. Falls back to "from now" for a fresh or unparseable window.
+    days = config.PAYMENT_PLANS[plan]["days"]
+    now = datetime.now(timezone.utc)
+    base = now
+    current_raw = db.get_paid_until(chat_id)
+    if current_raw:
+        try:
+            current = datetime.fromisoformat(current_raw)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            base = max(base, current)
+        except (TypeError, ValueError):
+            base = now
+    paid_until = base + timedelta(days=days)
     db.set_paid_until(chat_id, paid_until.isoformat())
     # A paying user is activated for proactive alerts here, without needing a
     # second /start. Seeding the wallet baseline stays global + idempotent (M1).
     _activate_entitled(chat_id, context)
+    label = config.PAYMENT_PLANS[plan]["label"]
     await update.message.reply_text(
-        "✅ <b>Payment verified — you're in.</b>\n"
+        f"✅ <b>Payment verified — {label} pass active.</b>\n"
         f"Access active until <b>{paid_until.strftime('%Y-%m-%d %H:%M UTC')}</b>.\n\n"
         + BANNER,
         parse_mode="HTML",

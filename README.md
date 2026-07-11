@@ -23,7 +23,7 @@ Open the bot and send `/scan`. **Your first scan is free — no signup, no walle
 | `/status` | Show your current state (active pass, alerts, scan cadence) | Free |
 | `/alerts` | Toggle the proactive push alerts on/off | Free |
 | `/start` | How to pay / refill your pass | Free |
-| `/paid <tx>` | Redeem a Solana USDC payment to activate | Free |
+| `/paid <plan> <tx>` | Redeem a Solana USDC payment to activate (`plan` = `week` or `month`) | Free |
 | `/stop` | Turn the scanner off | Free |
 | `/help` | Show the command list | Free |
 
@@ -33,8 +33,9 @@ When you have an active pass, MOONBOYHL also **pushes** high-confluence setups a
 
 The value commands and proactive alerts are gated behind a one-time on-chain payment:
 
-- **$3 USDC on Solana = up to 3 days** of access (about $1/day).
-- Send the payment to the bot's receiving address (shown in-bot via `/start`), then run **`/paid <tx_signature>`**.
+- Two tiered passes on Solana USDC: **1 week = $10 USDC** or **1 month = $30 USDC**.
+- Send the exact amount for your plan to the bot's receiving address (shown in-bot via `/start`), then run the matching command — **`/paid week <tx_signature>`** or **`/paid month <tx_signature>`**.
+- Paying again **refills** your time (a new pass extends from whatever access you have left, never shortening it).
 - The bot verifies the payment **directly on-chain** — it confirms the transaction succeeded, is recent, paid the correct USDC mint to the correct address, and met the required amount. It **fails closed**: if anything is uncertain, access is *not* granted.
 - **Replay-protected** — each transaction signature can be redeemed only once.
 - Your **first `/scan` is free**, once per chat, before the gate applies.
@@ -71,8 +72,11 @@ Set these in your environment or `.env` — **use your own values; the examples 
 | `PAYMENT_RECEIVING_ADDRESS` | ✅ | `YourSolanaUsdcAddressHere` | Your Solana address that receives USDC |
 | `SOLANA_RPC_URL` | – | `https://api.mainnet-beta.solana.com` | Any Solana mainnet RPC endpoint |
 | `OWNER_CHAT_ID` | – | `0` | Your Telegram chat id to bypass the paywall (`0` = disabled) |
-| `PAYMENT_PRICE_USD` | – | `3.00` | Price per pass, in USDC |
-| `PAYMENT_VALIDITY_DAYS` | – | `3` | How long a pass lasts |
+| `PAYMENT_PRICE_WEEK_USD` | – | `10.00` | Price of the 1-week pass, in USDC |
+| `PAYMENT_PRICE_MONTH_USD` | – | `30.00` | Price of the 1-month pass, in USDC |
+| `PAYMENT_DAYS_WEEK` | – | `7` | Access length of the week pass, in days |
+| `PAYMENT_DAYS_MONTH` | – | `30` | Access length of the month pass, in days |
+| `PAYMENT_TX_MAX_AGE_DAYS` | – | `3` | How fresh a redeemed tx must be (independent of pass length) |
 | `GROK_API_KEY` | – | `your-xai-api-key` | Optional; setups fall back to a local generator if unset |
 | `HL_INTEL_DB_PATH` | – | `/data/hl_intel.db` | Point at a persistent volume to keep state across restarts |
 | `WALLET_SCAN_INTERVAL_SECONDS` | – | `180` | How often tracked wallets are polled |

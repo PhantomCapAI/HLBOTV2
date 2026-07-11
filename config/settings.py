@@ -104,13 +104,31 @@ MIN_NOTIONAL_FOR_LIQ_ALERT = _f("MIN_NOTIONAL_FOR_LIQ_ALERT", 5_000_000)
 WALLET_HEALTH_DIGEST_MAX = _i("WALLET_HEALTH_DIGEST_MAX", 8)
 
 # ---- Pay-to-activate (Solana USDC) ----
-# Every /start re-charges $3.00 USDC on Solana ($1/day); paying via /paid <tx>
-# opens the chat for up to PAYMENT_VALIDITY_DAYS (3). After that window the value
-# commands re-gate and the user must repay. The receiving address is env-only.
+# Two tiered passes: a 1-week pass ($10 USDC) and a 1-month pass ($30 USDC).
+# Paying via /paid <plan> <tx> opens the chat for that plan's duration; after
+# the window the value commands re-gate and the user repays. Redemptions must be
+# fresh (PAYMENT_TX_MAX_AGE_DAYS) regardless of the plan's access length. The
+# receiving address is env-only.
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 PAYMENT_RECEIVING_ADDRESS = os.getenv("PAYMENT_RECEIVING_ADDRESS", "")
-PAYMENT_PRICE_USD = _f("PAYMENT_PRICE_USD", 3.00)
-PAYMENT_VALIDITY_DAYS = _i("PAYMENT_VALIDITY_DAYS", 3)
+
+PAYMENT_PRICE_WEEK_USD = _f("PAYMENT_PRICE_WEEK_USD", 10.00)
+PAYMENT_PRICE_MONTH_USD = _f("PAYMENT_PRICE_MONTH_USD", 30.00)
+PAYMENT_DAYS_WEEK = _i("PAYMENT_DAYS_WEEK", 7)
+PAYMENT_DAYS_MONTH = _i("PAYMENT_DAYS_MONTH", 30)
+# How old a redeemed transaction may be (blockTime freshness). Decoupled from a
+# plan's access length: a month pass grants 30 days of access, but the tx that
+# buys it must still be redeemed within this small window.
+PAYMENT_TX_MAX_AGE_DAYS = _i("PAYMENT_TX_MAX_AGE_DAYS", 3)
+
+# The available passes. `days` is the access length granted; `price_usd` is the
+# base amount to send (the per-chat unique amount adds a sub-cent nonce on top).
+# PAYMENT_PLAN_ORDER fixes the display order (cheapest first).
+PAYMENT_PLANS = {
+    "week": {"label": "1 week", "price_usd": PAYMENT_PRICE_WEEK_USD, "days": PAYMENT_DAYS_WEEK},
+    "month": {"label": "1 month", "price_usd": PAYMENT_PRICE_MONTH_USD, "days": PAYMENT_DAYS_MONTH},
+}
+PAYMENT_PLAN_ORDER = ["week", "month"]
 # Operator's Telegram chat id — bypasses the paywall (never pays, never burns
 # the free taste). 0 disables the bypass.
 OWNER_CHAT_ID = _i("OWNER_CHAT_ID", 0)
@@ -254,4 +272,9 @@ def validate() -> list[str]:
             "PAYMENT_RECEIVING_ADDRESS is not set — refusing to run a paywall "
             "with no payout address."
         )
+    prices = [p["price_usd"] for p in PAYMENT_PLANS.values()]
+    if any(pr <= 0 for pr in prices):
+        problems.append("Every PAYMENT_PLANS price must be > 0.")
+    if any(p["days"] <= 0 for p in PAYMENT_PLANS.values()):
+        problems.append("Every PAYMENT_PLANS duration (days) must be > 0.")
     return problems

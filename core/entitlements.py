@@ -40,31 +40,47 @@ def is_paid(chat_id: int) -> bool:
     return paid_until > datetime.now(timezone.utc)
 
 
+def _plan_lines(chat_id: int | None) -> str:
+    """One line per pass: label, the amount to send, and the redeem command.
+
+    With a chat_id each plan shows that chat's unique bound amount (base price +
+    per-chat sub-cent nonce, audit C1) at 4dp; without one it shows the plain
+    base price."""
+    lines = []
+    for plan in config.PAYMENT_PLAN_ORDER:
+        meta = config.PAYMENT_PLANS[plan]
+        if chat_id is not None:
+            amount = db.payment_reference(chat_id, plan) / 1_000_000
+            price = f"${amount:.4f}"
+        else:
+            price = f"${meta['price_usd']:.2f}"
+        lines.append(
+            f"• <b>{meta['label']}</b> — <b>{price} USDC</b> → "
+            f"<code>/paid {plan} &lt;tx_signature&gt;</code>"
+        )
+    return "\n".join(lines)
+
+
 def paywall_message(chat_id: int | None = None) -> str:
     address = (config.PAYMENT_RECEIVING_ADDRESS or "").strip()
-    days = config.PAYMENT_VALIDITY_DAYS
     addr_line = (
         f"<code>{address}</code>" if address
         else "<i>(payment address not configured — contact the operator)</i>"
     )
     if chat_id is not None:
-        # Bind the payment to this payer: a unique sub-cent amount (audit C1).
-        amount = db.assign_payment_reference(chat_id) / 1_000_000
-        price_line = f"Send <b>${amount:.4f} USDC</b> on <b>Solana</b> to:"
         exact_note = (
-            "\n⚠️ Send this <b>exact</b> amount (rounding up by under a cent is "
-            "fine) — the trailing digits identify your account. A different amount "
-            "can't be matched to you."
+            "\n⚠️ Send the <b>exact</b> amount for your plan (rounding up by "
+            "under a cent is fine) — the trailing digits identify your account. "
+            "A different amount can't be matched to you."
         )
     else:
-        price_line = f"Send <b>${config.PAYMENT_PRICE_USD:.2f} USDC</b> on <b>Solana</b> to:"
         exact_note = ""
     return (
         "🔒 <b>This command needs an active pass.</b>\n\n"
-        f"{price_line}\n"
-        f"{addr_line}{exact_note}\n\n"
-        f"Then run <code>/paid &lt;tx_signature&gt;</code> to unlock for "
-        f"{days} days.\n"
+        f"Send USDC on <b>Solana</b> to:\n{addr_line}\n\n"
+        f"{_plan_lines(chat_id)}{exact_note}\n\n"
+        "Then run the matching <code>/paid</code> command with your transaction "
+        "signature to unlock.\n"
         "Your first /scan is on the house."
     )
 
