@@ -135,7 +135,7 @@ PAYMENT_PLAN_ORDER = ["week", "month"]
 # re-gates and the user pays. Enforced once per chat. 0 disables trials.
 TRIAL_HOURS = _i("TRIAL_HOURS", 12)
 # Operator's Telegram chat id — bypasses the paywall (never pays, never burns
-# the free taste). 0 disables the bypass.
+# the free trial). 0 disables the bypass.
 OWNER_CHAT_ID = _i("OWNER_CHAT_ID", 0)
 
 # ---- Wallet identity & profile layer ----

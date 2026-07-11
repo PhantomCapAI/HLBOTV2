@@ -14,7 +14,9 @@ from core import identity
 
 import config
 from storage import database as db
-from core.entitlements import require_paid, is_paid, paywall_message
+from core.entitlements import (
+    require_paid, is_paid, paywall_message, activate_entitled, start_trial,
+)
 from core.solana_pay import verify_usdc_payment
 from scanner.setups import coin_scan, deep_dive_symbol
 from scanner.screener import flow_for
@@ -71,23 +73,6 @@ BANNER = (
 )
 
 
-def _activate_entitled(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Land an entitled chat (paid OR operator) in the active/alert set so the
-    proactive whale/confluence/liquidation pushes actually reach it.
-
-    Without this an entitled chat shows "active" copy but never enters
-    get_alert_chats(), so only on-demand /scan works. Idempotent:
-      * activate_chat upserts active=1 (and alerts_enabled=1 for a fresh row);
-      * we (re)enable alerts so a prior /stop+/alerts-off chat re-arms on /start;
-      * the wallet baseline is seeded once globally, guarded by the wallet_seeded
-        flag — never re-seeded per chat (that would pause the cycle for others, M1).
-    """
-    db.activate_chat(chat_id)
-    if not db.get_alerts_enabled(chat_id):
-        db.set_alerts_enabled(chat_id, True)
-    if db.get_state("wallet_seeded") != "1" and context.job_queue:
-        from services import cycles
-        context.job_queue.run_once(cycles.wallet_seed_job, when=2)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,7 +90,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     chat_id = update.effective_chat.id
     if is_paid(chat_id):
-        _activate_entitled(chat_id, context)
+        activate_entitled(chat_id, context)
         raw = db.get_paid_until(chat_id)
         if raw:
             access_line = (
@@ -208,7 +193,7 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.set_paid_until(chat_id, paid_until.isoformat())
     # A paying user is activated for proactive alerts here, without needing a
     # second /start. Seeding the wallet baseline stays global + idempotent (M1).
-    _activate_entitled(chat_id, context)
+    activate_entitled(chat_id, context)
     label = config.PAYMENT_PLANS[plan]["label"]
     await update.message.reply_text(
         f"✅ <b>Payment verified — {label} pass active.</b>\n"
@@ -246,11 +231,8 @@ async def trial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Grant the trial: mark it used first so a racing double-tap can't double-grant.
-    db.mark_trial_used(chat_id)
-    trial_until = datetime.now(timezone.utc) + timedelta(hours=config.TRIAL_HOURS)
-    db.set_paid_until(chat_id, trial_until.isoformat())
-    _activate_entitled(chat_id, context)
+    # Grant via the shared helper (same path the auto-trial gate uses).
+    trial_until = start_trial(chat_id, context)
     await update.message.reply_text(
         f"🎁 <b>Free trial started — {config.TRIAL_HOURS} hours of full access.</b>\n"
         f"Active until <b>{trial_until.strftime('%Y-%m-%d %H:%M UTC')}</b>. "
@@ -275,7 +257,7 @@ async def toggle_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Proactive alerts are now {status}")
 
 
-@require_paid(free_taste=True)
+@require_paid()
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Scanning Hyperliquid...")
     try:

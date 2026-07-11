@@ -685,15 +685,6 @@ def payment_reference(chat_id: int, plan: str) -> int:
     return round(price * 1_000_000) + slot * PAYMENT_REF_STEP_UNITS
 
 
-def mark_free_used(chat_id: int) -> None:
-    """Mark this chat's one free /scan as consumed (app_state kv — no active state)."""
-    set_state(f"free_used:{chat_id}", "1")
-
-
-def get_free_used(chat_id: int) -> bool:
-    return get_state(f"free_used:{chat_id}") == "1"
-
-
 def mark_trial_used(chat_id: int) -> None:
     """Mark this chat's one-time free trial as consumed (app_state kv)."""
     set_state(f"trial_used:{chat_id}", "1")

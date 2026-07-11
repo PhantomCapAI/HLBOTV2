@@ -6,7 +6,7 @@ Covers:
   * replay protection (used_payments).
   * /paid handler — activates on success, rejects reused tx, rejects bad arg,
     does not activate on verify failure.
-  * entitlement gate — paid runs, unpaid blocked, first /scan free then blocked,
+  * entitlement gate — paid runs, first gated use auto-starts the trial, blocked
     expired paid_until re-gates; correct handlers are/aren't decorated.
 
 Run: pytest tests/test_pay_to_activate.py
@@ -389,10 +389,10 @@ def test_start_hides_trial_after_used(tmp_db):
 
 
 # ---- entitlement gate ----
-def _make_gated(free_taste=False):
+def _make_gated():
     ran = {"v": False}
 
-    @ent.require_paid(free_taste=free_taste)
+    @ent.require_paid()
     async def handler(update, context):
         ran["v"] = True
         await update.message.reply_text("VALUE")
@@ -406,7 +406,9 @@ def test_gate_paid_runs(tmp_db):
     assert ran["v"] is True
 
 
-def test_gate_unpaid_blocked(tmp_db):
+def test_gate_unpaid_blocked_after_trial_used(tmp_db):
+    """A chat that already used its trial is gated (paywall, handler not run)."""
+    db.mark_trial_used(5)
     handler, ran = _make_gated()
     upd = FakeUpdate(5)
     asyncio.run(handler(upd, FakeContext()))
@@ -414,25 +416,44 @@ def test_gate_unpaid_blocked(tmp_db):
     assert any("pass" in r.lower() or "usdc" in r.lower() for r in upd.message.replies)
 
 
-def test_first_scan_free_then_blocked(tmp_db):
-    handler, ran = _make_gated(free_taste=True)
-    # 1st call: free taste
-    u1 = FakeUpdate(9)
-    asyncio.run(handler(u1, FakeContext()))
-    assert ran["v"] is True
-    assert db.get_free_used(9) is True
-    # 2nd call: blocked
-    ran["v"] = False
-    u2 = FakeUpdate(9)
-    asyncio.run(handler(u2, FakeContext()))
+def test_gate_blocked_when_trials_disabled(tmp_db, monkeypatch):
+    """With trials off, a fresh unpaid chat is gated immediately."""
+    monkeypatch.setattr(config, "TRIAL_HOURS", 0)
+    handler, ran = _make_gated()
+    upd = FakeUpdate(6)
+    asyncio.run(handler(upd, FakeContext()))
     assert ran["v"] is False
-    assert any("pass" in r.lower() or "usdc" in r.lower() for r in u2.message.replies)
+    assert db.get_trial_used(6) is False
+
+
+def test_first_gated_use_auto_starts_trial(tmp_db, monkeypatch):
+    _stub_cycles(monkeypatch)
+    handler, ran = _make_gated()
+    # 1st call: auto-starts the trial and runs the handler.
+    u1 = FakeUpdate(9)
+    asyncio.run(handler(u1, FakeContext(job_queue=FakeJobQueue())))
+    assert ran["v"] is True
+    assert db.get_trial_used(9) is True
+    assert ent.is_paid(9) is True                       # trial window is live
+    assert any("trial started" in r.lower() for r in u1.message.replies)
+    # Still works during the trial window (no second grant needed).
+    ran["v"] = False
+    asyncio.run(handler(FakeUpdate(9), FakeContext()))
+    assert ran["v"] is True
+    # After the window elapses, the used trial no longer unlocks — blocked.
+    db.set_paid_until(9, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    ran["v"] = False
+    u3 = FakeUpdate(9)
+    asyncio.run(handler(u3, FakeContext()))
+    assert ran["v"] is False
+    assert any("pass" in r.lower() or "usdc" in r.lower() for r in u3.message.replies)
 
 
 def test_expired_paid_regates(tmp_db):
     db.set_paid_until(5, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    db.mark_trial_used(5)              # trial already spent, so no auto-trial rescue
     assert ent.is_paid(5) is False
-    handler, ran = _make_gated()  # no free taste (not /scan)
+    handler, ran = _make_gated()
     asyncio.run(handler(FakeUpdate(5), FakeContext()))
     assert ran["v"] is False
 
@@ -442,11 +463,11 @@ def test_owner_bypass(tmp_db, monkeypatch):
     # Owner is always paid without any payment...
     assert ent.is_paid(777) is True
     assert db.get_paid_until(777) is None
-    # ...and a free-taste handler never burns the owner's freebie.
-    handler, ran = _make_gated(free_taste=True)
+    # ...and the gate never burns the owner's trial.
+    handler, ran = _make_gated()
     asyncio.run(handler(FakeUpdate(777), FakeContext()))
     assert ran["v"] is True
-    assert db.get_free_used(777) is False
+    assert db.get_trial_used(777) is False
     # A non-owner unpaid chat is still gated.
     assert ent.is_paid(778) is False
 
