@@ -95,3 +95,14 @@ State (subscribers, payment ledger, snapshots) lives in SQLite at `HL_INTEL_DB_P
 - ❌ It **does not place trades**, manage positions, or touch your trading funds or keys. It never asks for them.
 
 Markets are risky and signals are not guarantees. Trade at your own risk.
+
+## License
+
+**Proprietary — All Rights Reserved.** Copyright © 2026 PhantomCapAI.
+
+This is closed-source software. You may **not** use, copy, clone, fork,
+download, modify, redistribute, host, reverse-engineer, or extract data,
+methods, or signals from this project without prior **written** permission from
+the Owner. The source code and all trading/scoring logic are confidential trade
+secrets. See [`LICENSE`](LICENSE) for the full terms. For authorization or
+licensing inquiries, contact the Owner.
