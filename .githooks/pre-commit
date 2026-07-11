@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Secret-leak guard. Blocks a commit that would add a secret file or a
+# secret-looking value to the repo. Enable once per clone:
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass in a genuine emergency with `git commit --no-verify` (avoid).
+set -euo pipefail
+
+fail() { echo "🚫 pre-commit blocked: $1" >&2; echo "   ($2)" >&2; exit 1; }
+
+# Only inspect files staged for addition/modification.
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# 1) Never allow these files/paths to be committed at all.
+while IFS= read -r f; do
+  case "$f" in
+    .env|.env.*)
+      [ "$f" = ".env.example" ] && continue
+      fail "$f is a secrets file" "add it to .gitignore; keep secrets in the environment" ;;
+    *.key|*.pem|*.p12|*.pfx|*.keystore|*.der|id_rsa|id_ed25519)
+      fail "$f looks like key material" "key/cert files must never be committed" ;;
+    *.db|*.sqlite|*.sqlite3)
+      fail "$f is a database (subscriber PII + payment ledger)" "keep it on a private volume, not in git" ;;
+    *wallet*.json|*keypair*.json|*mnemonic*|*seed*.txt)
+      fail "$f looks like wallet/seed material" "never commit key or seed material" ;;
+  esac
+done <<< "$staged"
+
+# 2) Scan the staged CONTENT (not .example templates) for secret-looking values.
+#    Patterns are deliberately conservative to avoid false positives.
+patterns='-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----|(mnemonic|seed_phrase|secret_key|private_key)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']+|xai-[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|[0-9]{6,}:[A-Za-z0-9_-]{30,}'
+for f in $staged; do
+  case "$f" in
+    *.example|*.md) continue ;;
+  esac
+  [ -f "$f" ] || continue
+  if git show ":$f" 2>/dev/null | grep -nEq -e "$patterns"; then
+    match=$(git show ":$f" | grep -nE -e "$patterns" | head -1)
+    fail "$f contains a secret-looking value" "line: ${match} — move it to an env var"
+  fi
+done
+
+exit 0

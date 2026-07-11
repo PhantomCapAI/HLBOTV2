@@ -638,30 +638,28 @@ def is_payment_used(tx_signature: str) -> bool:
 # chats' acceptance windows never overlap and an over-pay within a chat's window
 # can't reach the next chat's slot (audit C1).
 PAYMENT_REF_STEP_UNITS = 20_000
-_PAYMENT_REF_MAX_SLOTS = 9_999
+# Distinct per-chat nonce slots. Capped at 999 (was 9999 in the single-price
+# era) so a plan's amount range — price + slot*$0.02, up to $19.98 above the
+# base — stays inside the $20.00 gap between the $10 (week) and $30 (month)
+# plans. That keeps every week amount (<= $29.98) strictly below every month
+# amount (>= $30.02), so no two plans' accept windows can ever collide and a
+# payment stays bound to one (chat, plan) pair (audit C1, extended to tiers).
+# Slots wrap after 999 chats (acceptable pre-public; revisit near that scale).
+_PAYMENT_REF_MAX_SLOTS = 999
 
 
-def get_payment_reference(chat_id: int) -> int | None:
-    """The chat's bound payment amount in USDC base units (6dp), or None if unset."""
-    raw = get_state(f"pay_ref:{chat_id}")
-    try:
-        return int(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return None
+def _assign_payment_slot(chat_id: int) -> int:
+    """Assign (once) a stable per-chat nonce slot in 1.._PAYMENT_REF_MAX_SLOTS.
 
-
-def assign_payment_reference(chat_id: int) -> int:
-    """Assign (once) a unique, stable USDC amount for this chat — base price plus a
-    per-chat nonce on a $0.02 grid. The trailing cents identify which chat a
-    payment belongs to, binding a payment to its payer (audit C1).
-
-    Returns the full expected amount in base units. Idempotent: the same chat
-    always gets the same amount. NOTE: references are spaced $0.02 apart, so the
-    Nth chat pays ~$0.02*N above the base price; distinct slots wrap after 9999
-    chats (acceptable pre-public; revisit if the user base approaches either)."""
-    existing = get_payment_reference(chat_id)
-    if existing is not None:
-        return existing
+    Idempotent: the same chat always gets the same slot, so its per-plan amounts
+    are stable across calls. The slot is plan-independent — the plan only sets
+    the base price the slot offset is added to."""
+    raw = get_state(f"pay_slot:{chat_id}")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
     seq_raw = get_state("pay_ref_seq")
     try:
         seq = int(seq_raw) + 1 if seq_raw is not None else 1
@@ -669,18 +667,31 @@ def assign_payment_reference(chat_id: int) -> int:
         seq = 1
     set_state("pay_ref_seq", str(seq))
     slot = (seq - 1) % _PAYMENT_REF_MAX_SLOTS + 1   # 1.._PAYMENT_REF_MAX_SLOTS
-    expected = round(config.PAYMENT_PRICE_USD * 1_000_000) + slot * PAYMENT_REF_STEP_UNITS
-    set_state(f"pay_ref:{chat_id}", str(expected))
-    return expected
+    set_state(f"pay_slot:{chat_id}", str(slot))
+    return slot
 
 
-def mark_free_used(chat_id: int) -> None:
-    """Mark this chat's one free /scan as consumed (app_state kv — no active state)."""
-    set_state(f"free_used:{chat_id}", "1")
+def payment_reference(chat_id: int, plan: str) -> int:
+    """The chat's bound USDC amount (base units, 6dp) for ``plan``.
+
+    Equals the plan's base price plus the chat's stable per-chat nonce on a
+    $0.02 grid. The trailing cents identify which chat a payment belongs to,
+    binding a payment to its payer (audit C1); the plan sets the whole-dollar
+    base so a week payment can never be matched against a month reference.
+
+    Raises KeyError for an unknown plan (callers validate the plan first)."""
+    price = config.PAYMENT_PLANS[plan]["price_usd"]
+    slot = _assign_payment_slot(chat_id)
+    return round(price * 1_000_000) + slot * PAYMENT_REF_STEP_UNITS
 
 
-def get_free_used(chat_id: int) -> bool:
-    return get_state(f"free_used:{chat_id}") == "1"
+def mark_trial_used(chat_id: int) -> None:
+    """Mark this chat's one-time free trial as consumed (app_state kv)."""
+    set_state(f"trial_used:{chat_id}", "1")
+
+
+def get_trial_used(chat_id: int) -> bool:
+    return get_state(f"trial_used:{chat_id}") == "1"
 
 
 # --------------------------- wallet profiles (identity + behavior) ---------------------------

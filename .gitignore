@@ -1,6 +1,30 @@
 __pycache__/
 *.pyc
+
+# --- Databases / local state (hold subscriber PII + payment ledger) ---
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Secrets: never commit any of these ---
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+*.der
+secrets.*
+credentials.*
+service-account*.json
+# Wallet / key material (this bot holds none by design — this is a backstop)
+*wallet*.json
+*keypair*.json
+*mnemonic*
+*seed*.txt

@@ -98,7 +98,7 @@ async def verify_usdc_payment(tx_signature: str, expected_units: int | None = No
     Confirms the transaction:
       * has a well-formed signature,
       * exists and succeeded (``meta.err`` is None),
-      * is no older than ``PAYMENT_VALIDITY_DAYS`` (blockTime freshness),
+      * is no older than ``PAYMENT_TX_MAX_AGE_DAYS`` (blockTime freshness),
       * increased the USDC balance *owned by* ``PAYMENT_RECEIVING_ADDRESS``
         (mint + recipient + amount in one check).
 
@@ -119,8 +119,12 @@ async def verify_usdc_payment(tx_signature: str, expected_units: int | None = No
         return _fail("malformed_signature")
 
     sig = tx_signature.strip()
-    base_units = round(config.PAYMENT_PRICE_USD * (10 ** USDC_DECIMALS))
-    max_age_seconds = config.PAYMENT_VALIDITY_DAYS * 86400
+    # Legacy floor (used only when expected_units is None): the cheapest plan's
+    # price. With a bound reference the exact per-(chat, plan) amount is enforced
+    # instead, so this floor only guards the unbound path.
+    min_price = min(p["price_usd"] for p in config.PAYMENT_PLANS.values())
+    base_units = round(min_price * (10 ** USDC_DECIMALS))
+    max_age_seconds = config.PAYMENT_TX_MAX_AGE_DAYS * 86400
 
     payload = {
         "jsonrpc": "2.0",
