@@ -694,6 +694,15 @@ def get_free_used(chat_id: int) -> bool:
     return get_state(f"free_used:{chat_id}") == "1"
 
 
+def mark_trial_used(chat_id: int) -> None:
+    """Mark this chat's one-time free trial as consumed (app_state kv)."""
+    set_state(f"trial_used:{chat_id}", "1")
+
+
+def get_trial_used(chat_id: int) -> bool:
+    return get_state(f"trial_used:{chat_id}") == "1"
+
+
 # --------------------------- wallet profiles (identity + behavior) ---------------------------
 # Counters that bump_profile_counters is allowed to increment (whitelist guards
 # the dynamic SQL).

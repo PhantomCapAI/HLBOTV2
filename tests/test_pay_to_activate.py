@@ -45,6 +45,7 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PAYMENT_PLANS", {k: dict(v) for k, v in _PLANS.items()})
     monkeypatch.setattr(config, "PAYMENT_PLAN_ORDER", ["week", "month"])
     monkeypatch.setattr(config, "PAYMENT_TX_MAX_AGE_DAYS", 3)
+    monkeypatch.setattr(config, "TRIAL_HOURS", 12)
     monkeypatch.setattr(config, "SOLANA_RPC_URL", "http://mock")
     yield
 
@@ -322,6 +323,71 @@ def test_paid_verify_failure_no_activation(tmp_db, monkeypatch):
     assert 7 not in db.get_active_chats()
 
 
+# --------------------------- one-time free trial ---------------------------
+def test_trial_grants_access_and_activates(tmp_db, monkeypatch):
+    import bot.handlers as h
+    _stub_cycles(monkeypatch)
+    upd = FakeUpdate(70)
+    asyncio.run(h.trial_cmd(upd, FakeContext(job_queue=FakeJobQueue())))
+    assert ent.is_paid(70) is True                 # full access granted
+    assert db.get_trial_used(70) is True           # consumed
+    assert 70 in db.get_alert_chats()              # proactive alerts flow
+    until = datetime.fromisoformat(db.get_paid_until(70))
+    remaining = until - datetime.now(timezone.utc)
+    assert timedelta(hours=11) < remaining <= timedelta(hours=12)
+    assert any("trial started" in r.lower() for r in upd.message.replies)
+
+
+def test_trial_is_one_time_only(tmp_db, monkeypatch):
+    import bot.handlers as h
+    _stub_cycles(monkeypatch)
+    asyncio.run(h.trial_cmd(FakeUpdate(71), FakeContext()))
+    # Simulate the 12h window elapsing.
+    db.set_paid_until(71, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    assert ent.is_paid(71) is False
+    upd2 = FakeUpdate(71)
+    asyncio.run(h.trial_cmd(upd2, FakeContext()))
+    assert ent.is_paid(71) is False                # not re-granted
+    assert any("already used" in r.lower() for r in upd2.message.replies)
+
+
+def test_trial_not_consumed_when_already_active(tmp_db, monkeypatch):
+    import bot.handlers as h
+    db.set_paid_until(72, (datetime.now(timezone.utc) + timedelta(days=5)).isoformat())
+    upd = FakeUpdate(72)
+    asyncio.run(h.trial_cmd(upd, FakeContext()))
+    assert db.get_trial_used(72) is False          # paid users keep their trial
+    assert any("already have active access" in r.lower() for r in upd.message.replies)
+
+
+def test_trial_disabled_when_zero_hours(tmp_db, monkeypatch):
+    import bot.handlers as h
+    monkeypatch.setattr(config, "TRIAL_HOURS", 0)
+    upd = FakeUpdate(73)
+    asyncio.run(h.trial_cmd(upd, FakeContext()))
+    assert ent.is_paid(73) is False
+    assert db.get_trial_used(73) is False
+    assert any("aren't available" in r.lower() for r in upd.message.replies)
+
+
+def test_start_offers_trial_to_new_chat(tmp_db):
+    import bot.handlers as h
+    upd = FakeUpdate(74)
+    asyncio.run(h.start(upd, FakeContext()))
+    body = " ".join(upd.message.replies).lower()
+    assert "/trial" in body and "free trial" in body
+
+
+def test_start_hides_trial_after_used(tmp_db):
+    import bot.handlers as h
+    db.mark_trial_used(75)
+    upd = FakeUpdate(75)
+    asyncio.run(h.start(upd, FakeContext()))
+    body = " ".join(upd.message.replies).lower()
+    assert "/trial" not in body                     # no longer offered
+    assert "active pass" in body                     # still shows the paywall
+
+
 # ---- entitlement gate ----
 def _make_gated(free_taste=False):
     ran = {"v": False}
@@ -394,7 +460,7 @@ def test_owner_bypass_disabled_when_zero(tmp_db, monkeypatch):
 def test_correct_handlers_gated(tmp_db):
     import bot.handlers as h
     gated = ["scan", "coin_cmd", "wallets_cmd", "confluence_cmd", "dexs_cmd", "scores_cmd"]
-    free = ["start", "paid_cmd", "stop_cmd", "toggle_alerts", "status_cmd", "help_cmd"]
+    free = ["start", "paid_cmd", "trial_cmd", "stop_cmd", "toggle_alerts", "status_cmd", "help_cmd"]
     for name in gated:
         assert hasattr(getattr(h, name), "__wrapped__"), f"{name} should be gated"
     for name in free:

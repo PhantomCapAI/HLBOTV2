@@ -23,6 +23,7 @@ Open the bot and send `/scan`. **Your first scan is free — no signup, no walle
 | `/status` | Show your current state (active pass, alerts, scan cadence) | Free |
 | `/alerts` | Toggle the proactive push alerts on/off | Free |
 | `/start` | How to pay / refill your pass | Free |
+| `/trial` | Start a one-time 12-hour free trial (full access, once per user) | Free |
 | `/paid <plan> <tx>` | Redeem a Solana USDC payment to activate (`plan` = `week` or `month`) | Free |
 | `/stop` | Turn the scanner off | Free |
 | `/help` | Show the command list | Free |
@@ -33,6 +34,7 @@ When you have an active pass, MOONBOYHL also **pushes** high-confluence setups a
 
 The value commands and proactive alerts are gated behind a one-time on-chain payment:
 
+- **Free trial:** every Telegram user can start a **one-time 12-hour trial** with `/trial` — full access, no payment. Once it's used and expires, the paywall applies (length configurable via `TRIAL_HOURS`).
 - Two tiered passes on Solana USDC: **1 week = $10 USDC** or **1 month = $30 USDC**.
 - Send the exact amount for your plan to the bot's receiving address (shown in-bot via `/start`), then run the matching command — **`/paid week <tx_signature>`** or **`/paid month <tx_signature>`**.
 - Paying again **refills** your time (a new pass extends from whatever access you have left, never shortening it).
@@ -77,6 +79,7 @@ Set these in your environment or `.env` — **use your own values; the examples 
 | `PAYMENT_DAYS_WEEK` | – | `7` | Access length of the week pass, in days |
 | `PAYMENT_DAYS_MONTH` | – | `30` | Access length of the month pass, in days |
 | `PAYMENT_TX_MAX_AGE_DAYS` | – | `3` | How fresh a redeemed tx must be (independent of pass length) |
+| `TRIAL_HOURS` | – | `12` | One-time free-trial length per user, in hours (`0` disables trials) |
 | `GROK_API_KEY` | – | `your-xai-api-key` | Optional; setups fall back to a local generator if unset |
 | `HL_INTEL_DB_PATH` | – | `/data/hl_intel.db` | Point at a persistent volume to keep state across restarts |
 | `WALLET_SCAN_INTERVAL_SECONDS` | – | `180` | How often tracked wallets are polled |

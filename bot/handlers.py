@@ -126,6 +126,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "A pass opens the scanner (value commands + proactive alerts). Pick a "
         "plan below.\n\n"
     )
+    if config.TRIAL_HOURS > 0 and not db.get_trial_used(chat_id):
+        intro += (
+            f"🎁 <b>New here?</b> Start a one-time <b>{config.TRIAL_HOURS}-hour "
+            "free trial</b> — no payment needed: /trial\n\n"
+        )
     await update.message.reply_text(intro + paywall_message(chat_id), parse_mode="HTML")
 
 
@@ -209,6 +214,47 @@ async def paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>Payment verified — {label} pass active.</b>\n"
         f"Access active until <b>{paid_until.strftime('%Y-%m-%d %H:%M UTC')}</b>.\n\n"
         + BANNER,
+        parse_mode="HTML",
+    )
+
+
+async def trial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the one-time free trial: TRIAL_HOURS of full access, once per chat.
+
+    Idempotent-safe: an already-active chat (paid, owner, or mid-trial) is told
+    it's active and the trial is NOT consumed; a chat that already used its trial
+    (and is no longer active) is sent to the paywall.
+    """
+    chat_id = update.effective_chat.id
+    if config.TRIAL_HOURS <= 0:
+        await update.message.reply_text(
+            "Free trials aren't available right now.\n\n" + paywall_message(chat_id),
+            parse_mode="HTML",
+        )
+        return
+    if is_paid(chat_id):
+        # Don't burn a trial for someone who already has access.
+        await update.message.reply_text(
+            "✅ You already have active access — no trial needed. Run /status to "
+            "see when it ends.")
+        return
+    if db.get_trial_used(chat_id):
+        await update.message.reply_text(
+            "⌛ You've already used your one-time free trial.\n\n"
+            + paywall_message(chat_id),
+            parse_mode="HTML",
+        )
+        return
+
+    # Grant the trial: mark it used first so a racing double-tap can't double-grant.
+    db.mark_trial_used(chat_id)
+    trial_until = datetime.now(timezone.utc) + timedelta(hours=config.TRIAL_HOURS)
+    db.set_paid_until(chat_id, trial_until.isoformat())
+    _activate_entitled(chat_id, context)
+    await update.message.reply_text(
+        f"🎁 <b>Free trial started — {config.TRIAL_HOURS} hours of full access.</b>\n"
+        f"Active until <b>{trial_until.strftime('%Y-%m-%d %H:%M UTC')}</b>. "
+        "After that, grab a pass with /start.\n\n" + BANNER,
         parse_mode="HTML",
     )
 

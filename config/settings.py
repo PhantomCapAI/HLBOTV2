@@ -129,6 +129,11 @@ PAYMENT_PLANS = {
     "month": {"label": "1 month", "price_usd": PAYMENT_PRICE_MONTH_USD, "days": PAYMENT_DAYS_MONTH},
 }
 PAYMENT_PLAN_ORDER = ["week", "month"]
+
+# One-time free trial: every chat may start a single trial that grants full
+# access (value commands + proactive alerts) for TRIAL_HOURS, after which it
+# re-gates and the user pays. Enforced once per chat. 0 disables trials.
+TRIAL_HOURS = _i("TRIAL_HOURS", 12)
 # Operator's Telegram chat id — bypasses the paywall (never pays, never burns
 # the free taste). 0 disables the bypass.
 OWNER_CHAT_ID = _i("OWNER_CHAT_ID", 0)
