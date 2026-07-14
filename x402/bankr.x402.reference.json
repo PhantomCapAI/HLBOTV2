@@ -1,0 +1,41 @@
+{
+  "//": "REFERENCE ONLY — not the live config. `bankr x402 init` / `add whale-check` generate the real config file; this environment could not reach docs.bankr.bot (egress 403) to confirm the exact filename (bankr.x402.json vs bankr.config.*) and field names. After you run the CLI, transcribe these VALUES into the generated config and delete this file. Docs win on any field-name conflict: https://docs.bankr.bot/x402-cloud/config-file",
+
+  "name": "whale-check",
+  "method": "GET",
+
+  "//price": "Placeholder $0.05/call — TUNE THIS. Rationale in x402/README.md. Marginal cost of the cached-snapshot design is ~$0 (reads SQLite, no per-call RPC/inference), so any positive price clears cost. $0.05 also keeps firehose polling far above the Telegram sub (e.g. polling every 3 min for a week ≈ 3,360 calls ≈ $168 vs the $10 week sub), so it does not cannibalize the sub. If you later switch to live-fetch-any-wallet (per-call RPC/inference), re-check price > that new marginal cost.",
+  "price": "0.05",
+
+  "//freeTier": "First 1,000 req/month at 0% platform fee, 5% after (per Bankr pricing). This is Bankr's cut, not the caller's price — confirm current numbers in the docs.",
+
+  "//schema": "JSON-Schema describing inputs (query params) and output. Confirm the exact wrapper key/shape the config expects.",
+  "input": {
+    "type": "object",
+    "required": ["target"],
+    "properties": {
+      "target": {
+        "type": "string",
+        "description": "A Hyperliquid wallet address (0x…40 hex) OR a coin/market symbol (e.g. HYPE). NOTE: the scoring engine is Hyperliquid-native — see the chain caveat in x402/README.md."
+      },
+      "chain": {
+        "type": "string",
+        "default": "base",
+        "description": "Echoed through; the engine scores Hyperliquid data regardless. See README caveat."
+      }
+    }
+  },
+  "output": {
+    "type": "object",
+    "properties": {
+      "healthScore": { "type": "number", "description": "0–100 current-state wallet health (or notional-weighted whale health for a coin)." },
+      "confluence": { "type": "number", "description": "Combined smart-score (skill) of the aligned whales." },
+      "whaleCount": { "type": "integer", "description": "Number of tracked whales aligned on the dominant coin+side." },
+      "netFlow": { "type": "string", "enum": ["accumulating", "distributing", "neutral"] },
+      "timestamp": { "type": "string", "format": "date-time" }
+    }
+  },
+
+  "//env": "Declare env var NAMES here; set VALUES via `bankr x402 env set …` (never commit values).",
+  "env": ["WHALE_CHECK_URL", "WHALE_CHECK_INTERNAL_KEY"]
+}

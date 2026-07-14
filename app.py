@@ -14,6 +14,7 @@ from storage import database as db
 from bot import telegram as tg
 from bot import handlers as h
 from services import cycles
+from services import whale_check_api
 
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
@@ -23,9 +24,16 @@ log = setup_logging()
 async def _post_init(app: Application) -> None:
     db.init_db()
     tg.set_application(app)
+    # Opt-in x402 whale-check endpoint (no-op unless enabled + key set). It shares
+    # this process's DB but runs on its own port and never touches the push stream.
+    await whale_check_api.start()
     if config.SEND_STARTUP_MESSAGE and db.get_alert_chats():
         await tg.broadcast(text="🚀 <b>HL Intel is live.</b>")
     log.info("HL Intel started. Active chats: %s", db.get_active_chats())
+
+
+async def _post_shutdown(app: Application) -> None:
+    await whale_check_api.stop()
 
 
 def main() -> None:
@@ -39,6 +47,7 @@ def main() -> None:
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
         .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
         .build()
     )
 

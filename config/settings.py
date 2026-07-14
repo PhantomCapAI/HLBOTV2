@@ -49,6 +49,18 @@ DB_PATH = Path(os.getenv("HL_INTEL_DB_PATH", str(_ROOT / "hl_intel.db")))
 WATCHLIST_PATH = os.getenv("HL_INTEL_WATCHLIST_PATH", str(_ROOT / "watchlist.json"))
 RETENTION_DAYS = _i("RETENTION_DAYS", 14)
 
+# ---- x402 whale-check endpoint (NEW agent-facing product; separate from the
+#      Telegram sub). OFF by default — starts only when explicitly enabled AND a
+#      key is set, so it never changes the running bot until you opt in. Reads
+#      snapshots only; never sends alerts. See services/whale_check_api.py. ----
+WHALE_CHECK_API_ENABLED = _b("WHALE_CHECK_API_ENABLED", False)
+WHALE_CHECK_API_HOST = os.getenv("WHALE_CHECK_API_HOST", "0.0.0.0")
+WHALE_CHECK_API_PORT = _i("WHALE_CHECK_API_PORT", 8402)
+# Shared secret the Bankr handler sends in X-Internal-Key. Set via env only.
+WHALE_CHECK_API_KEY = os.getenv("WHALE_CHECK_API_KEY")
+# A reading older than this (minutes) is treated as no-data -> caller not billed.
+WHALE_CHECK_FRESHNESS_MINUTES = _i("WHALE_CHECK_FRESHNESS_MINUTES", 30)
+
 # ---- Hyperliquid client pacing / weight budget ----
 HL_INFO_MIN_REQUEST_INTERVAL_SECONDS = _f("HL_INFO_MIN_REQUEST_INTERVAL_SECONDS", 0.75)
 HL_INFO_MAX_RETRIES = _i("HL_INFO_MAX_RETRIES", 5)
